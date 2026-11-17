@@ -97,3 +97,15 @@ A typical five-species run takes **about 5 minutes**, dominated by remote BLAST;
 - `Requirements & Design Document.md` — full specification: requirements, architecture, algorithms, acceptance criteria.
 - `PLAN.md` — phased implementation plan for coding agents.
 - `AGENTS.md` — working conventions for agents contributing to this repo.
+
+## Development
+
+The core logic lives in `src/tp53/` and is framework-free (no Streamlit imports outside `app/` and `streamlit_app.py`). Tests run fully offline against recorded fixtures in `tests/data/`:
+
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pytest
+```
+
+`src/tp53/config.py` holds every default, threshold and URL; `src/tp53/constants.py` holds the UI strings and colour palette. Nothing domain-specific is hard-coded in the logic.

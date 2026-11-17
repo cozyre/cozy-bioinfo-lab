@@ -1,0 +1,9 @@
+# Theme for the TP53 Conservation Analyzer.
+[theme]
+base = "light"
+primaryColor = "#0072B2"
+
+[server]
+# Uploads are validated in the app; keep the server limit aligned with
+# config.MAX_UPLOAD_BYTES plus head-room.
+maxUploadSize = 10
