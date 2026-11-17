@@ -171,10 +171,11 @@ def recorded_blast_result() -> BlastResult:
 
 
 class TestRecordedFixture:
-    """Assertions against the real recorded NCBI BLAST XML.
+    """Assertions against the fixture BLAST XML.
 
-    Expected values are cross-checked against the tabular output of the same
-    job (recorded alongside the XML).
+    The fixture is synthetic-but-realistic (see tests/data/README.md): real
+    sequences, real alignments, synthesized XML document. Expected values
+    are exact numbers produced by make_blast_fixture.py.
     """
 
     @pytest.fixture()
@@ -182,29 +183,75 @@ class TestRecordedFixture:
         return recorded_blast_result
 
     def test_header(self, result: BlastResult) -> None:
-        assert result.program == "blastp"
+        assert result.program == "BLASTP"
         assert result.database == "refseq_protein"
         assert result.query_len == 393
         assert result.species == "five species"
 
     def test_hits_present(self, result: BlastResult) -> None:
-        assert 1 <= len(result.hits) <= 10
-        organisms = {hit.organism for hit in result.hits if hit.organism}
+        assert len(result.hits) == 10
+        organisms = {hit.organism for hit in result.hits}
         assert {"Homo sapiens", "Pan troglodytes", "Mus musculus",
                 "Rattus norvegicus", "Bos taurus"} <= organisms
 
     def test_top_hit_is_human_refseq(self, result: BlastResult) -> None:
         hit = result.hits[0]
-        assert hit.accession.startswith("NP_")
+        assert hit.accession == "NP_001394193.1"
         assert hit.organism == "Homo sapiens"
-        assert hit.hsps[0].identity > 380
+        assert hit.length == 393
+        assert hit.hsps[0].identity == 393
+        assert hit.hsps[0].align_len == 393
+        assert hit.hsps[0].gaps == 0
         assert hit.hsps[0].evalue <= 1e-10
+        assert hit.hsps[0].bit_score == pytest.approx(975.966, abs=0.01)
+
+    def test_chimpanzee_is_identical_to_human(self, result: BlastResult) -> None:
+        # p53 is protein-identical between human and chimpanzee.
+        chimp = next(hit for hit in result.hits if hit.organism == "Pan troglodytes")
+        assert chimp.accession == "XP_001172077.2"
+        assert chimp.hsps[0].identity == 393
+        assert chimp.hsps[0].bit_score == pytest.approx(975.966, abs=0.01)
+
+    def test_mouse_np_over_xp_tie_break_material(self, result: BlastResult) -> None:
+        """Two mouse candidates tie exactly (bit, identity, coverage): the
+        deterministic NP-over-XP preference (§9.2 step 3) must pick the NP."""
+        mouse = [hit for hit in result.hits if hit.organism == "Mus musculus"]
+        np_hit = next(hit for hit in mouse if hit.accession.startswith("NP_"))
+        xp_hit = next(hit for hit in mouse if hit.accession.startswith("XP_"))
+        assert np_hit.best_hsp.bit_score == xp_hit.best_hsp.bit_score
+        assert np_hit.best_hsp.identity == xp_hit.best_hsp.identity
+        assert np_hit.best_hsp.align_len == xp_hit.best_hsp.align_len
+
+    def test_every_species_has_a_viable_candidate(self, result: BlastResult) -> None:
+        """For each of the five species the best candidate passes the §9.2
+        filters (E-value, 70% coverage), so AC-1 can hold on this fixture."""
+        for species in ("Homo sapiens", "Pan troglodytes", "Mus musculus",
+                        "Rattus norvegicus", "Bos taurus"):
+            candidates = [hit for hit in result.hits if hit.organism == species]
+            assert candidates, species
+            best = max(candidates, key=lambda hit: hit.best_hsp.bit_score)
+            hsp = best.best_hsp
+            coverage = (hsp.query_end - hsp.query_start + 1) / 393
+            assert hsp.evalue <= 1e-10, species
+            assert coverage >= 0.70, species
 
     def test_hsps_have_ranges(self, result: BlastResult) -> None:
         for hit in result.hits:
             for hsp in hit.hsps:
                 assert 1 <= hsp.query_start <= hsp.query_end <= 393
-                assert hsp.align_len == hsp.query_end - hsp.query_start + 1 + hsp.gaps
+                # align_len = query span + query-side gaps, and likewise
+                # for the subject span + subject-side gaps (FR-09).
+                assert hsp.align_len == (
+                    hsp.query_end - hsp.query_start + 1 + hsp.qseq.count("-")
+                )
+                assert hsp.align_len == (
+                    hsp.hit_end - hsp.hit_start + 1 + hsp.hseq.count("-")
+                )
                 assert len(hsp.qseq) == hsp.align_len
                 assert len(hsp.hseq) == hsp.align_len
                 assert len(hsp.midline) == hsp.align_len
+                # identity/positives/gaps are consistent with the strings
+                assert hsp.identity == sum(
+                    1 for a, b in zip(hsp.qseq, hsp.hseq, strict=True) if a == b
+                )
+                assert hsp.gaps == hsp.qseq.count("-") + hsp.hseq.count("-")
