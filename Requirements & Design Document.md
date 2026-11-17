@@ -56,6 +56,7 @@ Version 1.0 (draft) · 17 November 2026 · Audience: the project owner and the c
 | Conservation metric | Percent identity per alignment column only. |
 | Reporting | No report export. Results are shown in the app. |
 | Deployment | Streamlit Community Cloud. |
+| Contact email | Each user enters their own NCBI/EBI contact email in the app before running (owner decision, 2026-11-17). Nothing identifying is stored in the repository; an optional `st.secrets` entry may pre-fill the field for the deployer's convenience. |
 
 ### 3.2 Assumptions (please correct any that are wrong)
 
@@ -286,7 +287,7 @@ Biopython's `Bio.Blast.NCBIXML` is the recommended parser for BLAST XML, wrapped
 | NCBI Entrez efetch (db=protein) | Full-length subject sequences, NCBI-accession queries | Set contact email and tool name. API key optional via `st.secrets`. |
 | EBI Clustal Omega REST (`ebi.ac.uk/Tools/services/rest/clustalo`) | MSA | Asynchronous: run, poll status, fetch the FASTA alignment result. Requires an email parameter. Verify parameter and result-type names against current EBI documentation. |
 
-All endpoints and credentials are read from `config.py` and `st.secrets`, never hard-coded in client logic.
+All endpoints are read from `config.py`, never hard-coded in client logic. The contact email is supplied by the user at runtime (owner decision, 2026-11-17) and is never stored in the repository.
 
 ## 9. Algorithms and rules
 
@@ -429,7 +430,7 @@ A scientific sanity check, not an automated test: the DNA-binding core of TP53 s
 
 - Public or accessible GitHub repository, entry point `streamlit_app.py` at the repository root.
 - `requirements.txt` with pinned versions: streamlit, biopython, requests, pandas, numpy, plotly (plus pytest for development).
-- Secrets in `st.secrets`: `NCBI_EMAIL` (required), `NCBI_API_KEY` (optional), `EBI_EMAIL` (can reuse `NCBI_EMAIL`).
+- Contact email: each user enters their own NCBI/EBI contact email in the app sidebar before running — NCBI and EBI require it for etiquette, and it is never stored in the repository. A deployer may optionally pre-fill it via `st.secrets`; `NCBI_API_KEY` is optional (raises rate limits).
 - Use `st.cache_data` with a time-to-live for client calls and parsed results. Do not write results to disk.
 - Keep each remote call within sensible timeouts and surface progress, since apps on the free tier can sleep and sessions can drop.
 - The example snapshot ships inside the repository so the app is demonstrable even when external services fail.

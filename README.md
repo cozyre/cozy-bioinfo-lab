@@ -33,12 +33,11 @@ pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-Python 3.11 is recommended. NCBI and EBI ask that automated use identifies itself, so set your contact email in `.streamlit/secrets.toml`:
+Python 3.11 is recommended. NCBI and EBI ask that automated use identifies itself: the app asks each user for a contact email in the sidebar, and nothing identifying is stored in the repository or in `.streamlit/secrets.toml`. Optionally a deployer can pre-fill it there:
 
 ```toml
-NCBI_EMAIL = "you@example.com"
-# optional: NCBI_API_KEY = "..."   # raises NCBI rate limits
-# optional: EBI_EMAIL = "..."      # defaults to NCBI_EMAIL
+NCBI_EMAIL = "you@example.com"   # optional pre-fill for the sidebar field
+# optional: NCBI_API_KEY = "..."  # raises NCBI rate limits
 ```
 
 ### On Streamlit Community Cloud
