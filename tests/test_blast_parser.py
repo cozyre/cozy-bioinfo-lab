@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from tp53.blast_parser import parse_blast_xml
+from tp53.blast_parser import (
+    _counts,
+    _parse_accession,
+    _parse_organism,
+    parse_blast_xml,
+)
 from tp53.models import BlastResult
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -125,6 +130,46 @@ class TestMiniXml:
             parse_blast_xml("<?xml version='1.0'?><foo/>")
 
 
+class TestCounterNormalisation:
+    """Biopython versions differ in how counters are returned."""
+
+    def test_int_value(self) -> None:
+        assert _counts(300) == (300, 300)
+
+    def test_tuple_value(self) -> None:
+        assert _counts((300, 385)) == (300, 385)
+
+    def test_legacy_string_value(self) -> None:
+        assert _counts("300/385 (77%)") == (300, 385)
+
+    def test_none_value(self) -> None:
+        assert _counts(None) == (0, 0)
+
+    def test_unparseable_value(self) -> None:
+        assert _counts("n/a") == (0, 0)
+
+
+class TestAccessionAndOrganism:
+    def test_accession_from_ref_style_id(self) -> None:
+        assert _parse_accession("ref|NP_038672.1|") == "NP_038672.1"
+
+    def test_accession_without_pipe_kept_as_is(self) -> None:
+        assert _parse_accession("plain_id_1") == "plain_id_1"
+
+    def test_organism_from_title(self) -> None:
+        assert _parse_organism("p53 [Mus musculus]") == "Mus musculus"
+
+    def test_organism_missing_gives_empty(self) -> None:
+        assert _parse_organism("unnamed protein product") == ""
+
+
+@pytest.fixture(scope="class")
+def recorded_blast_result() -> BlastResult:
+    if not FIXTURE.exists():  # pragma: no cover - recorded fixture guard
+        pytest.skip("recorded BLAST XML fixture not present")
+    return parse_blast_xml(FIXTURE.read_text(), species="five species")
+
+
 class TestRecordedFixture:
     """Assertions against the real recorded NCBI BLAST XML.
 
@@ -132,11 +177,9 @@ class TestRecordedFixture:
     job (recorded alongside the XML).
     """
 
-    @pytest.fixture(scope="class")
-    def result(self) -> BlastResult:
-        if not FIXTURE.exists():  # pragma: no cover - recorded fixture guard
-            pytest.skip("recorded BLAST XML fixture not present")
-        return parse_blast_xml(FIXTURE.read_text(), species="five species")
+    @pytest.fixture()
+    def result(self, recorded_blast_result: BlastResult) -> BlastResult:
+        return recorded_blast_result
 
     def test_header(self, result: BlastResult) -> None:
         assert result.program == "blastp"
