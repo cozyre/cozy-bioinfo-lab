@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
+from tp53.fasta_io import parse_fasta
 from tp53.msa import (
     alignment_statistics,
     parse_alignment,
@@ -12,6 +15,8 @@ from tp53.msa import (
     validate_alignment,
 )
 from tp53.models import Alignment, AlignmentValidationError
+
+DATA_DIR = Path(__file__).parent / "data"
 
 # 0-indexed columns:   0  1  2  3  4  5
 # Query (ref) row:     A  C  -  G  T  -
@@ -141,6 +146,57 @@ class TestValidateAlignment:
         alignment = parse_alignment(RAW_ALN, REF_ID)
         alignment.ids = [identifier.lower() for identifier in alignment.ids]
         assert validate_alignment(alignment, EXPECTED_IDS) == []
+
+
+class TestRecordedFixture:
+    """The real Clustal Omega alignment of TP53 orthologs (AC-2 style).
+
+    The alignment was recorded once from the EBI Clustal Omega REST service;
+    the input to that service is committed as ``msa_input.fasta``.
+    """
+
+    MSA = DATA_DIR / "msa_tp53_five_species.fasta"
+    INPUT = DATA_DIR / "msa_input.fasta"
+    REF_ID = "Homo sapiens|P04637"
+
+    @pytest.fixture()
+    def alignment(self) -> Alignment:
+        return parse_alignment(self.MSA.read_text(), self.REF_ID)
+
+    def test_shape(self, alignment: Alignment) -> None:
+        assert len(alignment.rows) == 5
+        assert alignment.length > 0
+        assert all(len(row) == alignment.length for row in alignment.rows)
+        assert alignment.ref_index == 0
+
+    def test_truncated_ids_resolved(self, alignment: Alignment) -> None:
+        # Clustal truncates "Homo sapiens|P04637" to "Homo"; the reference
+        # row must still be resolved (prefix match, §9.4).
+        assert alignment.ids[0] == "Homo"
+
+    def test_col_to_ref_maps_reference(self, alignment: Alignment) -> None:
+        ref_row = alignment.rows[0]
+        non_gap = [value for value in alignment.col_to_ref if value is not None]
+        # every non-gap reference character got a strictly increasing position
+        assert non_gap == sorted(non_gap)
+        assert len(non_gap) == len(ref_row) - ref_row.count("-")
+
+    def test_trim_and_validate_against_input(self, alignment: Alignment) -> None:
+        input_records = parse_fasta(self.INPUT.read_text())
+        expected_ids = [record.id for record in input_records]
+        expected_seqs = [record.sequence for record in input_records]
+        trimmed, removed = trim_all_gap_columns(alignment)
+        assert removed >= 0
+        warnings = validate_alignment(
+            trimmed, expected_ids, expected_seqs
+        )
+        assert warnings == []  # after parse_alignment remaps ids by order
+
+    def test_degapping_reproduces_input_hard_check(self, alignment: Alignment) -> None:
+        input_records = parse_fasta(self.INPUT.read_text())
+        trimmed, _ = trim_all_gap_columns(alignment)
+        for row, record in zip(trimmed.rows, input_records, strict=True):
+            assert row.replace("-", "") == record.sequence
 
 
 class TestAlignmentStatistics:
