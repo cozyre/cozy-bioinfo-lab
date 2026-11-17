@@ -242,7 +242,7 @@ fetch_query_info(accession: str, session) -> QueryInfo
 
 # clients/ncbi.py
 fetch_protein(accession: str, session, email: str) -> SequenceRecord
-submit_blastp(seq: str, organism: str, params: BlastParams, session) -> str      # returns RID
+submit_blastp(seq: str, organism: str, params: BlastParams, email: str, session) -> str      # returns RID
 poll_blast(rid: str, session, timeout_s: int) -> str                              # returns XML text
 
 # clients/ebi.py
@@ -255,8 +255,8 @@ parse_blast_xml(xml_text: str, species: str) -> BlastResult
 select_best_hit(result: BlastResult, params: SelectionParams) -> SelectedHit | None
 
 # msa.py
-parse_alignment(text: str, ref_id: str) -> Alignment
-validate_alignment(aln: Alignment, expected_ids: list[str]) -> list[str]          # returns warnings
+parse_alignment(text: str, ref_id: str, expected_ids: list[str]) -> Alignment
+validate_alignment(aln: Alignment, expected_ids: list[str], expected_sequences: list[str]) -> list[str]  # returns warnings
 
 # conservation.py
 column_identity(aln: Alignment) -> tuple[list[float], list[float]]
@@ -277,6 +277,8 @@ identity_heatmap(result) -> plotly Figure
 ```
 
 Biopython's `Bio.Blast.NCBIXML` is the recommended parser for BLAST XML, wrapped so the rest of the code only sees the project's own dataclasses.
+
+Interface corrections (owner-approved, 2026-11-17): `expected_ids` and `expected_sequences` are required parameters of the MSA functions — the §9.4 ID rules and de-gap hard check cannot run without them, and required parameters make it impossible to skip the hard check silently. `submit_blastp` takes the user-supplied contact email explicitly (§3.1 contact-email decision).
 
 ## 8. External integrations
 

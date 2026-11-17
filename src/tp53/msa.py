@@ -65,17 +65,18 @@ def _build_col_to_ref(rows: list[str], ref_index: int) -> list[int | None]:
     return col_to_ref
 
 
-def parse_alignment(text: str, ref_id: str, expected_ids: list[str] | None = None) -> Alignment:
+def parse_alignment(text: str, ref_id: str, expected_ids: list[str]) -> Alignment:
     """Parse an aligned multi-FASTA into an :class:`Alignment`.
 
-    Sequences are upper-cased and whitespace-stripped. All-gap columns are
-    removed (§9.4) before the column-to-reference map is built.
+    Sequences are upper-cased and whitespace-stripped.
 
     Args:
         text: aligned FASTA text (Clustal Omega output or an uploaded MSA).
         ref_id: ID of the reference (query) row for the coordinate map.
-        expected_ids: IDs of the input records, in input order. When the
-            service rewrote the IDs, rows are remapped by order (§9.4).
+        expected_ids: IDs of the input records, in input order. Required
+            because the §9.4 ID rules need them: when the service rewrote
+            the IDs, rows are remapped by order, and the reference row is
+            located by them.
 
     Returns:
         Alignment with ``col_to_ref`` built from the reference row.
@@ -100,7 +101,9 @@ def parse_alignment(text: str, ref_id: str, expected_ids: list[str] | None = Non
     return alignment
 
 
-def _remap_ids(ids: list[str], ref_id: str, expected_ids: list[str] | None) -> tuple[list[str], int]:
+def _remap_ids(
+    ids: list[str], ref_id: str, expected_ids: list[str] | None
+) -> tuple[list[str], int]:
     """Resolve row identity: as parsed, or remapped by order (§9.4)."""
     if expected_ids and not all(
         _normalise_id(a) == _normalise_id(b)
@@ -116,7 +119,7 @@ def _remap_ids(ids: list[str], ref_id: str, expected_ids: list[str] | None) -> t
 def validate_alignment(
     alignment: Alignment,
     expected_ids: list[str],
-    expected_sequences: list[str] | None = None,
+    expected_sequences: list[str],
 ) -> list[str]:
     """Validate an alignment against the input records (§9.4, FR-16).
 
@@ -128,8 +131,9 @@ def validate_alignment(
     Args:
         alignment: parsed alignment.
         expected_ids: IDs of the input records, in input order.
-        expected_sequences: input sequences, in the same order. Given, the
-            §9.4 hard consistency check runs on every row.
+        expected_sequences: input sequences, in the same order. Required
+            because the §9.4 hard consistency check must always run —
+            a silently skipped check is the failure mode it guards against.
 
     Returns:
         Warnings, e.g. that IDs were remapped by order.
@@ -154,12 +158,9 @@ def validate_alignment(
             raise AlignmentValidationError(
                 ERR_BAD_CHARS.format(id=identifier, chars=" ".join(invalid))
             )
-        if expected_sequences is not None:
-            expected = expected_sequences[index].upper().replace("-", "")
-            if alignment.ungapped_row(index) != expected:
-                raise AlignmentValidationError(
-                    ERR_DEGAP_MISMATCH.format(id=identifier)
-                )
+        expected = expected_sequences[index].upper().replace("-", "")
+        if alignment.ungapped_row(index) != expected:
+            raise AlignmentValidationError(ERR_DEGAP_MISMATCH.format(id=identifier))
 
     if expected_ids and not all(
         _normalise_id(a) == _normalise_id(b)
