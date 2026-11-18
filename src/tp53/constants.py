@@ -45,6 +45,20 @@ CONSERVATION_CLASSES: tuple[str, ...] = (
     "gapped",
 )
 
+#: Feature-summary table columns (FR-22, §9.9).
+FEATURE_SUMMARY_COLUMNS: tuple[str, ...] = (
+    "feature",
+    "type",
+    "start",
+    "end",
+    "columns",
+    "mean_identity",
+    "fully_conserved_pct",
+)
+
+#: Label of the final row that aggregates positions outside all features.
+OUTSIDE_FEATURES_LABEL: str = "Outside all annotated features"
+
 # --- Validation error messages (FR-03, FR-16) ----------------------------------
 
 ERR_NOT_FASTA: str = "Input is not a FASTA file: no '>' header line found."

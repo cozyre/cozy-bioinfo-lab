@@ -27,9 +27,12 @@ DEFAULT_QUERY_ACCESSION: str = "P04637"
 FASTA_MIN_LEN: int = 20
 FASTA_MAX_LEN: int = 5000
 
+#: The 20 standard amino acids (counted in column identity, §9.5).
+STANDARD_AMINO_ACIDS: str = "ACDEFGHIKLMNPQRSTVWY"
+
 #: The 20 standard amino acids plus the IUPAC ambiguity codes accepted
 #: anywhere in the app (§9.4). Gap handling is separate (GAP_CHAR).
-PROTEIN_ALPHABET: str = "ACDEFGHIKLMNPQRSTVWYXBZJUO"
+PROTEIN_ALPHABET: str = STANDARD_AMINO_ACIDS + "XBZJUO"
 
 #: Alignment gap character used by Clustal Omega and this app.
 GAP_CHAR: str = "-"
@@ -56,15 +59,47 @@ REQUEST_TIMEOUT_S: int = 30
 HTTP_MAX_RETRIES: int = 3
 HTTP_BACKOFF_FACTOR_S: float = 2.0
 
-#: NCBI BLAST polling: never poll more often than this (check the current
-#: NCBI usage guidelines again when implementing the clients in phase 2).
+#: Only these HTTP statuses are worth retrying; other 4xx errors are I/O
+#: errors in the request itself and are surfaced immediately.
+HTTP_RETRYABLE_STATUSES: tuple[int, ...] = (429, 500, 502, 503, 504)
+
+#: Tool name sent to NCBI/EBI so they can identify traffic from this app
+#: (NCBI BLAST URL API usage guidelines: email + tool are required).
+NCBI_TOOL_NAME: str = "tp53_conservation_analyzer"
+
+#: Only features with exact boundaries can be mapped to reference positions.
+UNIPROT_EXACT_MODIFIER: str = "EXACT"
+
+#: UniProt feature types shown in the app and included in the feature summary
+#: (FR-06, §9.9). "DNA binding" is the spelling in the 2026 UniProt JSON;
+#: "DNA-binding" is accepted for forward compatibility.
+UNIPROT_FEATURE_TYPES: tuple[str, ...] = (
+    "Domain",
+    "Region",
+    "DNA binding",
+    "DNA-binding",
+    "Motif",
+    "Zinc finger",
+)
+
+#: NCBI BLAST polling: never poll one RID more often than this. Current NCBI
+#: guidelines (verified 2026-11-18): at most one request every 10 s per client
+#: and at most one poll per RID per minute; send email and tool on every call.
 BLAST_POLL_INTERVAL_S: int = 60
+
+#: NCBI BLAST result format used by the clients (the parser expects XML).
+BLAST_RESULT_FORMAT: str = "XML"
 
 #: Overall ceiling on a single remote BLAST job.
 BLAST_MAX_WAIT_S: int = 15 * 60
 
 #: Delay between staggered per-species BLAST submissions (§9.1).
 BLAST_STAGGER_DELAY_S: int = 10
+
+#: EBI Clustal Omega REST parameters (verified against current job-dispatcher
+#: documentation: email is required, ``out`` returns the aligned FASTA).
+EBI_CLUSTALO_SEQUENCE_TYPE: str = "protein"
+EBI_CLUSTALO_RESULT_TYPE: str = "out"
 
 #: EBI Clustal Omega polling interval.
 EBI_POLL_INTERVAL_S: int = 3

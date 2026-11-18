@@ -6,7 +6,7 @@ A Streamlit web app that automates a protein conservation analysis for **TP53** 
 
 It replaces a manual lab workflow (running BLAST, aligning sequences, computing conservation by hand, plotting, writing up) with a single automated pipeline.
 
-> **Status:** 🚧 under construction. This repository currently contains the design document and implementation plan; the app itself is being built phase by phase (see `PLAN.md`).
+> **Status:** 🚧 under construction. Phases 1–2 (offline parsing, remote-service clients, hit selection and conservation analysis) are implemented and tested; the Streamlit app follows in phase 3 (see `PLAN.md`).
 
 ---
 
@@ -108,3 +108,23 @@ pytest
 ```
 
 `src/tp53/config.py` holds every default, threshold and URL; `src/tp53/constants.py` holds the UI strings and colour palette. Nothing domain-specific is hard-coded in the logic.
+
+### Manual live smoke test (not part of `pytest`)
+
+The automated suite never calls external services. Before deployment, run one real round-trip by hand with your own contact email (services are slow and rate-limited, so this is deliberately manual):
+
+```python
+from tp53 import config
+from tp53.clients.uniprot import fetch_query_info
+from tp53.clients.ncbi import submit_blastp, poll_blast
+from tp53.clients.ebi import run_clustalo
+import requests
+
+session = requests.Session()
+info = fetch_query_info("P04637", session)
+rid = submit_blastp(info.record.sequence, "Mus musculus", config.BlastParams(), "you@example.org", session)
+xml = poll_blast(rid, session, timeout_s=config.BLAST_MAX_WAIT_S, email="you@example.org")
+fasta = run_clustalo(">Homo\n" + info.record.sequence + "\n", "you@example.org", session, config.EBI_MAX_WAIT_S)
+```
+
+Expected: a 393-residue query with feature annotations, a valid BLAST XML string, and aligned FASTA containing both submitted sequences. Never commit contact details or live responses; update `tests/data/` fixtures deliberately if the service responses change.
