@@ -7,20 +7,25 @@ RID per minute (verified 2026-11-18), with an overall wall-clock deadline.
 
 from __future__ import annotations
 
+import io
 import re
 import time
 from collections.abc import Callable
 from typing import Any
 
+from Bio import SeqIO
+from Bio.SeqFeature import ExactPosition
+
 from tp53 import config
 from tp53.clients.base import (
+    PollOutcome,
     RemoteServiceError,
-    RemoteTimeout,
+    poll_until,
     request_with_retry,
 )
 from tp53.config import BlastParams
 from tp53.fasta_io import parse_fasta
-from tp53.models import SequenceRecord, ValidationError
+from tp53.models import DomainFeature, QueryInfo, SequenceRecord, ValidationError
 
 _RID_RE = re.compile(r"\bRID\s*=\s*([A-Za-z0-9_-]+)")
 _STATUS_RE = re.compile(r"\bStatus\s*=\s*([A-Za-z]+)")
@@ -95,6 +100,116 @@ def fetch_protein(
     return record
 
 
+def _genbank_feature(feature: Any) -> DomainFeature | None:
+    """Map one GenBank feature to a :class:`DomainFeature`, if relevant.
+
+    Only exact locations can be resolved to reference positions (§9.7), so
+    fuzzy/unknown boundaries are skipped just as they are for UniProt.
+    """
+    mapped_type = config.NCBI_FEATURE_TYPES.get(str(feature.type))
+    if mapped_type is None:
+        return None
+    location = feature.location
+    if not isinstance(location.start, ExactPosition) or not isinstance(
+        location.end, ExactPosition
+    ):
+        return None
+    start = int(location.start) + 1  # GenBank locations are 0-based
+    end = int(location.end)
+    if start < 1 or end < start:
+        return None
+    qualifiers = feature.qualifiers
+    names = qualifiers.get("region_name") or qualifiers.get("note") or [mapped_type]
+    name = str(names[0]) if names else mapped_type
+    return DomainFeature(type=mapped_type, name=name, start=start, end=end)
+
+
+def _parse_genbank(text: str, accession: str) -> tuple[SequenceRecord, list[DomainFeature]]:
+    """Parse an efetch GenBank record into a query record and features (FR-06)."""
+    parsed = list(SeqIO.parse(io.StringIO(text), "genbank"))
+    if not parsed:
+        raise RemoteServiceError(
+            f"NCBI efetch returned no GenBank record for {accession}."
+        )
+    record = parsed[0]
+    sequence = str(record.seq).upper().strip()
+    if not sequence:
+        raise RemoteServiceError(f"NCBI efetch returned no sequence for {accession}.")
+
+    description = record.description.strip()
+    organism = str(record.annotations.get("organism") or "")
+    organism_match = re.search(r"\[([^\[\]]+)\]\s*$", description)
+    if organism_match:
+        if not organism:
+            organism = organism_match.group(1)
+        description = description[: organism_match.start()].strip()
+    gene = ""
+    for feature in record.features:
+        genes = feature.qualifiers.get("gene") or []
+        if genes:
+            gene = str(genes[0])
+            break
+    if gene and gene not in description:
+        description = f"{description} (gene: {gene})".strip() if description else f"Gene: {gene}"
+
+    version = str(record.annotations.get("version") or "").strip()
+    identifier = version or str(record.id).strip() or accession
+    result = SequenceRecord(
+        id=identifier,
+        accession=identifier,
+        organism=organism,
+        description=description,
+        sequence=sequence,
+    )
+    features = [
+        mapped
+        for feature in record.features
+        if (mapped := _genbank_feature(feature)) is not None
+    ]
+    return result, features
+
+
+def fetch_ncbi_query_info(
+    accession: str,
+    session: Any,
+    email: str,
+    *,
+    api_key: str | None = None,
+    timeout: int = config.REQUEST_TIMEOUT_S,
+) -> QueryInfo:
+    """Fetch an NCBI accession's sequence, organism, gene and features (FR-06).
+
+    The layer that dispatches by accession source (Phase 3) chooses this
+    function for NCBI accessions and :func:`tp53.clients.uniprot.fetch_query_info`
+    for UniProt accessions.
+
+    Args:
+        accession: NCBI protein accession, e.g. ``"NP_035770.2"``.
+        session: injected requests-like session.
+        email: user-supplied contact email sent to NCBI.
+        api_key: optional NCBI API key.
+        timeout: per-request timeout in seconds.
+
+    Returns:
+        Query sequence and features in 1-based reference coordinates.
+
+    Raises:
+        RemoteServiceError: efetch returned no usable GenBank record.
+    """
+    params = {
+        "db": "protein",
+        "id": accession,
+        "rettype": config.NCBI_EFETCH_GB_RETTYPE,
+        "retmode": config.NCBI_EFETCH_TEXT_RETMODE,
+        **_identification(email, api_key),
+    }
+    response = request_with_retry(
+        session, "GET", config.NCBI_EFETCH_URL, timeout=timeout, params=params
+    )
+    record, features = _parse_genbank(response.text, accession)
+    return QueryInfo(record=record, features=features)
+
+
 def submit_blastp(
     seq: str,
     organism: str,
@@ -134,7 +249,12 @@ def submit_blastp(
         **_identification(email, api_key),
     }
     response = request_with_retry(
-        session, "POST", config.NCBI_BLAST_URL, timeout=timeout, data=data
+        session,
+        "POST",
+        config.NCBI_BLAST_URL,
+        timeout=timeout,
+        data=data,
+        retry=False,
     )
     text = response.text
     match = _RID_RE.search(text)
@@ -197,6 +317,59 @@ def _is_blast_xml(text: str) -> bool:
     return "<BlastOutput" in text
 
 
+def poll_blast_once(
+    rid: str,
+    session: Any,
+    *,
+    email: str = "",
+    api_key: str | None = None,
+    timeout: int = config.REQUEST_TIMEOUT_S,
+) -> PollOutcome:
+    """Perform exactly one poll of a BLAST job and classify its response.
+
+    A one-shot primitive lets the pipeline poll several RIDs in a single
+    round-robin loop (§9.1) rather than blocking on one job at a time;
+    :func:`poll_blast` keeps the blocking interface of §7.2.
+
+    Args:
+        rid: RID returned by :func:`submit_blastp`.
+        session: injected requests-like session.
+        email: contact email sent on every poll.
+        api_key: optional NCBI API key.
+        timeout: per-request timeout in seconds.
+
+    Returns:
+        Pending, complete (with XML), or failed outcome. ``READY`` without
+        XML is a failure: polling again cannot help and would waste a full
+        NCBI polling interval.
+    """
+    params = {
+        "CMD": "Get",
+        "RID": rid,
+        "FORMAT_TYPE": config.BLAST_RESULT_FORMAT,
+        **_identification(email, api_key),
+    }
+    response = request_with_retry(
+        session, "GET", config.NCBI_BLAST_URL, timeout=timeout, params=params
+    )
+    text = response.text
+    status = _status(text)
+    if status == "FAILED":
+        detail = _ncbi_error_message(text) or "BLAST job failed"
+        return PollOutcome.failed(f"NCBI BLAST job {rid} failed: {detail}.")
+    if _is_blast_xml(text):
+        return PollOutcome.complete(text)
+    if status == "READY":
+        return PollOutcome.failed(
+            f"NCBI BLAST job {rid} is READY but returned no XML."
+        )
+    if status not in {"WAITING", "RUNNING", "UNKNOWN"}:
+        return PollOutcome.failed(
+            f"NCBI BLAST job {rid} returned an unexpected status: {status}."
+        )
+    return PollOutcome.pending()
+
+
 def poll_blast(
     rid: str,
     session: Any,
@@ -233,27 +406,15 @@ def poll_blast(
         RemoteTimeout: the job did not finish before ``timeout_s``.
         RemoteServiceError: the job failed or the response was unrecognised.
     """
-    params = {
-        "CMD": "Get",
-        "RID": rid,
-        "FORMAT_TYPE": config.BLAST_RESULT_FORMAT,
-        **_identification(email, api_key),
-    }
-    start = clock()
-    while clock() - start < timeout_s:
-        response = request_with_retry(
-            session, "GET", config.NCBI_BLAST_URL, timeout=timeout, params=params
-        )
-        text = response.text
-        status = _status(text)
-        if status == "FAILED":
-            detail = _ncbi_error_message(text) or "BLAST job failed"
-            raise RemoteServiceError(f"NCBI BLAST job {rid} failed: {detail}.")
-        if _is_blast_xml(text):
-            return text
-        if status not in {"WAITING", "RUNNING", "READY", "UNKNOWN"}:
-            raise RemoteServiceError(
-                f"NCBI BLAST job {rid} returned an unexpected status: {status}."
-            )
-        sleep(poll_interval)
-    raise RemoteTimeout(f"NCBI BLAST job {rid} did not finish within {timeout_s} s.")
+
+    def check() -> PollOutcome:
+        return poll_blast_once(rid, session, email=email, api_key=api_key, timeout=timeout)
+
+    return poll_until(
+        check,
+        label=f"NCBI BLAST job {rid}",
+        timeout_s=timeout_s,
+        interval_s=poll_interval,
+        sleep=sleep,
+        clock=clock,
+    )

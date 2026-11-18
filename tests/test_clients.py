@@ -23,8 +23,10 @@ from tp53.clients import (
 )
 from tp53.clients.ebi import run_clustalo
 from tp53.clients.ncbi import (
+    fetch_ncbi_query_info,
     fetch_protein,
     poll_blast,
+    poll_blast_once,
     submit_blastp,
     submit_blastp_staggered,
 )
@@ -145,6 +147,14 @@ class TestRetryHelper:
             request_with_retry(session, "GET", "https://example.org")
         assert len(session.calls) == config.HTTP_MAX_RETRIES
 
+    def test_retry_can_be_disabled_for_non_idempotent_calls(self) -> None:
+        session = FakeSession([requests.Timeout("slow"), "ok"])
+        with pytest.raises(RemoteTimeout, match="timed out"):
+            request_with_retry(
+                session, "POST", "https://example.org", retry=False
+            )
+        assert len(session.calls) == 1
+
 
 class TestUniProtClient:
     def test_real_fixture_json(self) -> None:
@@ -232,6 +242,53 @@ class TestNCBIClient:
         with pytest.raises(RemoteServiceError, match="no FASTA record"):
             fetch_protein("NP_000000", session, email="user@example.org")
 
+    def test_fetch_ncbi_query_info(self) -> None:
+        genbank = (
+            "LOCUS       NP_000001                 30 aa    linear   PRI 01-JAN-2026\n"
+            "DEFINITION  test protein [Mus musculus].\n"
+            "ACCESSION   NP_000001\n"
+            "VERSION     NP_000001.1\n"
+            "KEYWORDS    .\n"
+            "SOURCE      Mus musculus\n"
+            "  ORGANISM  Mus musculus\n"
+            "            Eukaryota.\n"
+            "FEATURES             Location/Qualifiers\n"
+            "     source          1..30\n"
+            '                     /organism="Mus musculus"\n'
+            '                     /gene="Testg"\n'
+            "     Region          1..10\n"
+            '                     /region_name="Test region"\n'
+            "     Motif           12..18\n"
+            "     ZnF_C2H2        20..28\n"
+            '                     /note="zinc finger"\n'
+            "     Helix           2..5\n"
+            "     Region          <1..5\n"
+            '                     /region_name="Fuzzy"\n'
+            "ORIGIN\n"
+            "        1 maaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "//\n"
+        )
+        session = FakeSession([FakeResponse(genbank)])
+        info = fetch_ncbi_query_info("NP_000001.1", session, email="user@example.org")
+        assert info.record.accession == "NP_000001.1"
+        assert info.record.organism == "Mus musculus"
+        assert info.record.description == "test protein (gene: Testg)"
+        assert info.record.sequence == "M" + "A" * 29
+        assert [(f.type, f.name, f.start, f.end) for f in info.features] == [
+            ("Region", "Test region", 1, 10),
+            ("Motif", "Motif", 12, 18),
+            ("Zinc finger", "zinc finger", 20, 28),
+        ]
+        params = session.calls[0][2]["params"]
+        assert params["rettype"] == config.NCBI_EFETCH_GB_RETTYPE
+        assert params["email"] == "user@example.org"
+        assert params["tool"] == config.NCBI_TOOL_NAME
+
+    def test_fetch_ncbi_query_info_no_record(self) -> None:
+        session = FakeSession(["not a GenBank record"])
+        with pytest.raises(RemoteServiceError, match="no GenBank record"):
+            fetch_ncbi_query_info("NP_000001", session, email="user@example.org")
+
     def test_submit_blastp(self) -> None:
         session = FakeSession(["RID = ABC123\nRTOE = 42\n"])
         rid = submit_blastp(
@@ -274,6 +331,15 @@ class TestNCBIClient:
         with pytest.raises(RemoteServiceError, match="Message ID#32"):
             submit_blastp("X", "Mus musculus", config.BlastParams(), "a@b.c", session)
 
+    def test_submit_blastp_http_error_not_retried(self) -> None:
+        session = FakeSession([FakeResponse(status_code=503)] * config.HTTP_MAX_RETRIES)
+        with pytest.raises(RemoteHTTPError) as excinfo:
+            submit_blastp(
+                "MEEPQSDPS", "Mus musculus", config.BlastParams(), "a@b.c", session
+            )
+        assert excinfo.value.status_code == 503
+        assert len(session.calls) == 1  # a retry could create a duplicate BLAST job
+
     def test_poll_blast_returns_xml(self) -> None:
         xml = (DATA_DIR / "blast_tp53_five_species.xml").read_text()
         clock = FakeClock()
@@ -295,6 +361,22 @@ class TestNCBIClient:
             for call in session.calls
         )
 
+    def test_poll_blast_once_is_one_request(self) -> None:
+        session = FakeSession(["Status=WAITING\n"])
+        outcome = poll_blast_once("ABC123", session, email="user@example.org")
+        assert outcome.state == "pending"
+        assert len(session.calls) == 1
+
+    def test_poll_blast_ready_without_xml_fails_fast(self) -> None:
+        clock = FakeClock()
+        session = FakeSession(["Status=READY\n"])
+        with pytest.raises(RemoteServiceError, match="READY"):
+            poll_blast(
+                "ABC123", session, timeout_s=120, clock=clock, sleep=clock.sleep
+            )
+        assert len(session.calls) == 1
+        assert clock.now == 0.0  # no wasted 60 s poll interval
+
     def test_poll_blast_timeout(self) -> None:
         clock = FakeClock()
         session = FakeSession(["Status=WAITING\n"] * 5)
@@ -307,6 +389,7 @@ class TestNCBIClient:
                 sleep=clock.sleep,
             )
         assert len(session.calls) == 2
+        assert clock.now <= config.BLAST_POLL_INTERVAL_S + 1
 
     def test_poll_blast_failed_job(self) -> None:
         session = FakeSession(["Status=FAILED\nMessage ID#51 Error: bad RID"])
@@ -379,3 +462,4 @@ class TestEBIClient:
         with pytest.raises(RemoteHTTPError) as excinfo:
             run_clustalo(">a\nAAAA\n", "a@b.c", session, 30, clock=FakeClock())
         assert excinfo.value.status_code == 503
+        assert len(session.calls) == 1  # a retry could duplicate the MSA job

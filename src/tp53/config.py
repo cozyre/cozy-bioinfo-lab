@@ -50,6 +50,12 @@ NCBI_EFETCH_URL: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcg
 NCBI_BLAST_URL: str = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
 EBI_CLUSTALO_URL: str = "https://www.ebi.ac.uk/Tools/services/rest/clustalo"
 
+#: Resource paths appended to :data:`EBI_CLUSTALO_URL` (§8). Clients never
+#: assemble endpoints from literals of their own.
+EBI_CLUSTALO_RUN_PATH: str = "/run"
+EBI_CLUSTALO_STATUS_PATH: str = "/status/{job_id}"
+EBI_CLUSTALO_RESULT_PATH: str = "/result/{job_id}/{result_type}"
+
 # --- HTTP etiquette (§5 Reliability, Service etiquette) ----------------------
 
 #: Per-request timeout in seconds for every HTTP call.
@@ -86,6 +92,22 @@ UNIPROT_FEATURE_TYPES: tuple[str, ...] = (
 #: guidelines (verified 2026-11-18): at most one request every 10 s per client
 #: and at most one poll per RID per minute; send email and tool on every call.
 BLAST_POLL_INTERVAL_S: int = 60
+
+#: Entrez efetch formats: GenBank text carries the feature table needed for
+#: FR-06, while FASTA is used for full-length hit sequences (FR-12).
+NCBI_EFETCH_GB_RETTYPE: str = "gb"
+NCBI_EFETCH_TEXT_RETMODE: str = "text"
+
+#: Entrez GenBank feature types mapped onto the canonical names used by
+#: UniProt (§9.9). This is a vocabulary mapping, not a domain annotation.
+NCBI_FEATURE_TYPES: dict[str, str] = {
+    "Domain": "Domain",
+    "Region": "Region",
+    "Motif": "Motif",
+    "ZnF_C2H2": "Zinc finger",
+    "ZnF_C4": "Zinc finger",
+    "DNA binding": "DNA binding",
+}
 
 #: NCBI BLAST result format used by the clients (the parser expects XML).
 BLAST_RESULT_FORMAT: str = "XML"

@@ -13,8 +13,9 @@ from typing import Any
 
 from tp53 import config
 from tp53.clients.base import (
+    PollOutcome,
     RemoteServiceError,
-    RemoteTimeout,
+    poll_until,
     request_with_retry,
 )
 
@@ -56,38 +57,45 @@ def run_clustalo(
     response = request_with_retry(
         session,
         "POST",
-        f"{config.EBI_CLUSTALO_URL}/run",
+        f"{config.EBI_CLUSTALO_URL}{config.EBI_CLUSTALO_RUN_PATH}",
         timeout=timeout,
         data={
             "email": email,
             "sequence": fasta,
             "stype": config.EBI_CLUSTALO_SEQUENCE_TYPE,
         },
+        retry=False,
     )
     job_id = response.text.strip().splitlines()[0].strip() if response.text.strip() else ""
     if not job_id:
         raise RemoteServiceError("EBI Clustal Omega returned no job ID.")
 
-    status_url = f"{config.EBI_CLUSTALO_URL}/status/{job_id}"
-    result_url = (
-        f"{config.EBI_CLUSTALO_URL}/result/{job_id}/{config.EBI_CLUSTALO_RESULT_TYPE}"
+    status_url = config.EBI_CLUSTALO_URL + config.EBI_CLUSTALO_STATUS_PATH.format(
+        job_id=job_id
     )
-    start = clock()
-    while clock() - start < timeout_s:
+    result_url = config.EBI_CLUSTALO_URL + config.EBI_CLUSTALO_RESULT_PATH.format(
+        job_id=job_id, result_type=config.EBI_CLUSTALO_RESULT_TYPE
+    )
+
+    def check() -> PollOutcome:
         status_response = request_with_retry(
             session, "GET", status_url, timeout=timeout
         )
         status = status_response.text.strip().upper()
         if status == _FINISHED:
-            result = request_with_retry(
-                session, "GET", result_url, timeout=timeout
-            )
-            return result.text
+            result = request_with_retry(session, "GET", result_url, timeout=timeout)
+            return PollOutcome.complete(result.text)
         if status in _FAILURE_STATUSES:
-            raise RemoteServiceError(
+            return PollOutcome.failed(
                 f"EBI Clustal Omega job {job_id} failed with status {status}."
             )
-        sleep(poll_interval)
-    raise RemoteTimeout(
-        f"EBI Clustal Omega job {job_id} did not finish within {timeout_s} s."
+        return PollOutcome.pending()
+
+    return poll_until(
+        check,
+        label=f"EBI Clustal Omega job {job_id}",
+        timeout_s=timeout_s,
+        interval_s=poll_interval,
+        sleep=sleep,
+        clock=clock,
     )

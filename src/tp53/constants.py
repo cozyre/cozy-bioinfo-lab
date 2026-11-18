@@ -2,6 +2,11 @@
 
 Everything the UI shows lives here (A1: English UI) so it can be localised
 later, plus the colour-blind-safe palette used by ``viz`` (§11).
+
+This module is pure data (no imports, no framework dependency), so domain
+modules may import labels and messages from it. This is a narrow, deliberate
+extension of the §6.2 import list: it keeps a single source of truth for every
+displayed string without leaking Streamlit into the core.
 """
 
 from __future__ import annotations

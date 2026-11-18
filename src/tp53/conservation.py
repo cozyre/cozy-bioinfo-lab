@@ -14,6 +14,7 @@ import pandas as pd
 
 from tp53 import config
 from tp53.constants import (
+    CONSERVATION_CLASSES,
     FEATURE_SUMMARY_COLUMNS,
     OUTSIDE_FEATURES_LABEL,
 )
@@ -23,6 +24,9 @@ from tp53.models import (
     ConservedRegion,
     DomainFeature,
 )
+
+#: The five class labels, from the single source in :mod:`tp53.constants`.
+FULLY_CONSERVED, HIGH, MODERATE, LOW, GAPPED = CONSERVATION_CLASSES
 
 #: Keys of :attr:`ConservationResult.summary` (consumed by the UI in phase 3).
 SUMMARY_MEAN_IDENTITY = "mean_identity"
@@ -87,15 +91,15 @@ def classify_columns(
     classes: list[str] = []
     for percent, gaps in zip(identity, gap_fraction, strict=True):
         if percent >= 100.0 and gaps == 0:
-            classes.append("fully conserved")
+            classes.append(FULLY_CONSERVED)
         elif percent >= params.high_threshold:
-            classes.append("high")
+            classes.append(HIGH)
         elif percent >= params.moderate_threshold:
-            classes.append("moderate")
+            classes.append(MODERATE)
         elif gaps > 0:
-            classes.append("gapped")
+            classes.append(GAPPED)
         else:
-            classes.append("low")
+            classes.append(LOW)
     return classes
 
 
@@ -236,7 +240,7 @@ def summarise_features(
     Feature start/end are 1-based reference positions resolved through the
     column map. Overlapping features may share columns; the final row uses
     only columns not covered by any feature. Columns where the reference has
-    a gap have no reference position and count as outside.
+    a gap have no reference position and are excluded from both.
 
     Args:
         aln: alignment with a reference column map.
@@ -265,7 +269,11 @@ def summarise_features(
             indices,
             identity,
         )
-    outside = [index for index in range(aln.length) if index not in covered]
+    outside = [
+        index
+        for index, position in enumerate(aln.col_to_ref)
+        if position is not None and index not in covered
+    ]
     _add_feature_row(rows, OUTSIDE_FEATURES_LABEL, "", "", "", outside, identity)
     return pd.DataFrame(rows, columns=list(FEATURE_SUMMARY_COLUMNS))
 
@@ -287,9 +295,7 @@ def summarise_conservation(
     Returns:
         Dict keyed by the ``SUMMARY_*`` constants defined in this module.
     """
-    fully_conserved = sum(
-        1 for label in classes if label == "fully conserved"
-    )
+    fully_conserved = sum(1 for label in classes if label == FULLY_CONSERVED)
     total = len(identity)
     return {
         SUMMARY_MEAN_IDENTITY: sum(identity) / total if total else 0.0,

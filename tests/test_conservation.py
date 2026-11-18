@@ -20,7 +20,11 @@ from tp53.conservation import (
     pairwise_identity,
     summarise_features,
 )
-from tp53.constants import FEATURE_SUMMARY_COLUMNS, OUTSIDE_FEATURES_LABEL
+from tp53.constants import (
+    CONSERVATION_CLASSES,
+    FEATURE_SUMMARY_COLUMNS,
+    OUTSIDE_FEATURES_LABEL,
+)
 from tp53.fasta_io import parse_fasta
 from tp53.models import Alignment, DomainFeature
 from tp53.msa import parse_alignment, trim_all_gap_columns, validate_alignment
@@ -90,6 +94,13 @@ class TestColumnIdentity:
 
     def test_empty_alignment(self) -> None:
         assert column_identity(Alignment([], [], 0, 0)) == ([], [])
+
+    def test_labels_come_from_constants(self) -> None:
+        result = compute_conservation(make_alignment("AAAAA", "AAAAA"))
+        assert set(result.classes) <= set(CONSERVATION_CLASSES)
+        assert result.summary[SUMMARY_FULLY_CONSERVED_COUNT] == sum(
+            label == CONSERVATION_CLASSES[0] for label in result.classes
+        )
 
 
 class TestRegions:
@@ -167,6 +178,26 @@ class TestFeatureSummary:
         assert summary.loc[1, "start"] == 5 and summary.loc[1, "end"] == 7
         assert summary.loc[2, "feature"] == OUTSIDE_FEATURES_LABEL
         assert summary.loc[2, "columns"] == 4  # positions 4, 8, 9, 10
+
+    def test_outside_row_excludes_reference_gap_columns(self) -> None:
+        aln = make_alignment(
+            "AC-DEFGH",  # reference gap at alignment column 3
+            "ACXDEFGH",
+            "ACXDEFGH",
+            "ACXDEFGH",
+            "ACXDEFGH",
+        )
+        assert aln.col_to_ref == [1, 2, None, 3, 4, 5, 6, 7]
+        identity, _ = column_identity(aln)
+        summary = summarise_features(
+            aln, identity, [DomainFeature("Region", "First two", 1, 2)]
+        )
+        assert summary.loc[0, "columns"] == 2
+        assert summary.loc[1, "feature"] == OUTSIDE_FEATURES_LABEL
+        # Columns 4-8 are outside the feature; column 3 has no reference
+        # position and must not be counted (§9.7).
+        assert summary.loc[1, "columns"] == 5
+        assert summary.loc[1, "mean_identity"] == pytest.approx(sum(identity[3:]) / 5)
 
     def test_empty_features(self) -> None:
         aln = make_alignment("AAAAA", "AAAAA")
