@@ -15,14 +15,14 @@ if str(_SRC) not in sys.path:
 
 
 def main() -> None:
-    """Run the app. Full UI is implemented in phase 3; this is the stub."""
+    """Configure the page and delegate rendering to :mod:`app.pages`."""
     import streamlit as st
 
+    from app.pages import render_app
     from tp53.constants import APP_TITLE
 
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    st.title(APP_TITLE)
-    st.info("The app UI is under construction — see PLAN.md phase 3.")
+    render_app()
 
 
 if __name__ == "__main__":
