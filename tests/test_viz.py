@@ -150,8 +150,27 @@ def test_blast_overview_v3() -> None:
     ]
     for trace in fig.data:
         assert len(trace.y) == len(result.selected)
-        assert all(trace.text)
-    assert list(fig.data[0].y) == [hit.species for hit in result.selected]
+    # Every selected hit has an identity value; the query row has no bit score.
+    assert all(fig.data[0].text)
+    query_rows = [
+        index
+        for index, hit in enumerate(result.selected)
+        if hit.reason == constants.SELECT_REASON_QUERY
+    ]
+    for index, _hit in enumerate(result.selected):
+        if index in query_rows:
+            assert fig.data[1].x[index] is None
+            assert fig.data[1].text[index] is None
+        else:
+            assert fig.data[1].x[index] is not None
+            assert fig.data[1].text[index] is not None
+    expected_species = [
+        f"{hit.species} ({constants.FIG_QUERY_NO_BLAST})"
+        if hit.reason == constants.SELECT_REASON_QUERY
+        else hit.species
+        for hit in result.selected
+    ]
+    assert list(fig.data[0].y) == expected_species
     assert fig.layout.xaxis.range == (0.0, 100.0)
 
 

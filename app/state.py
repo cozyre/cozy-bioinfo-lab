@@ -8,6 +8,7 @@ created by the framework-free core.
 from __future__ import annotations
 
 import json
+import xml.etree.ElementTree as ET
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -216,6 +217,43 @@ def _read_example_file(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def _split_blast_xml_by_species(xml: str) -> dict[str, str]:
+    """Turn the bundled combined BLAST XML into per-organism jobs (§9.1).
+
+    Real remote jobs are organism-restricted at submission time, so each
+    result contains hits from one species only. The bundled snapshot is one
+    combined XML for all five species; split it here so example mode mirrors
+    the remote flow and selection picks each species' own ortholog instead of
+    the globally best hit.
+
+    Args:
+        xml: Combined NCBI BLAST XML from the bundled snapshot.
+
+    Returns:
+        Mapping of each configured species to an organism-filtered XML string.
+    """
+    header = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE BlastOutput PUBLIC "-//NCBI//NCBI BlastOutput/EN" '
+        '"NCBI_BlastOutput.dtd">\n'
+    )
+    split: dict[str, str] = {}
+    for species in config.SPECIES:
+        root = ET.fromstring(xml)
+        hits = root.find("./BlastOutput_iterations/Iteration/Iteration_hits")
+        if hits is not None:
+            for hit in list(hits):
+                definition = hit.findtext("Hit_def") or ""
+                if not definition.rstrip().endswith(f"[{species}]"):
+                    hits.remove(hit)
+            for number, hit in enumerate(hits, start=1):
+                element = hit.find("Hit_num")
+                if element is not None:
+                    element.text = str(number)
+        split[species] = header + ET.tostring(root, encoding="unicode") + "\n"
+    return split
+
+
 @st.cache_data(ttl=config.CACHE_TTL_S, show_spinner=False)
 def load_example_inputs() -> PipelineInputs:
     """Build offline pipeline inputs from the bundled TP53 snapshot (A8).
@@ -243,11 +281,11 @@ def load_example_inputs() -> PipelineInputs:
             full_sequences[records[0].accession] = records[0].sequence
 
     return PipelineInputs(
-        query_accession=config.DEFAULT_QUERY_ACCESSION,
-        accession_source="uniprot",
+        # query_info is the single query source in example mode: the pipeline
+        # enforces exactly one of query_info / accession / FASTA (§7.1).
         query_info=query_info,
         species=config.SPECIES,
-        blast_xml_by_species={species: blast_xml for species in config.SPECIES},
+        blast_xml_by_species=_split_blast_xml_by_species(blast_xml),
         msa_fasta=msa_fasta,
         full_sequences=full_sequences,
     )

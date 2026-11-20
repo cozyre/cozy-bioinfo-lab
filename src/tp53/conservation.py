@@ -210,8 +210,8 @@ def _add_feature_row(
     rows: dict[str, list],
     label: str,
     feature_type: str,
-    start: int | str,
-    end: int | str,
+    start: int | None,
+    end: int | None,
     columns: list[int],
     identity: list[float],
 ) -> None:
@@ -274,7 +274,7 @@ def summarise_features(
         for index, position in enumerate(aln.col_to_ref)
         if position is not None and index not in covered
     ]
-    _add_feature_row(rows, OUTSIDE_FEATURES_LABEL, "", "", "", outside, identity)
+    _add_feature_row(rows, OUTSIDE_FEATURES_LABEL, "", None, None, outside, identity)
     return pd.DataFrame(rows, columns=list(FEATURE_SUMMARY_COLUMNS))
 
 

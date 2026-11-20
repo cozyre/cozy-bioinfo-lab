@@ -576,9 +576,18 @@ def blast_overview(selected: list[SelectedHit]) -> go.Figure:
     """
     if not selected:
         return _empty_figure(constants.FIG_TITLE_BLAST)
-    species = [hit.species for hit in selected]
+    # The query stands in for its own organism and has no BLAST bit score
+    # (§9.1). Label it explicitly instead of drawing a misleading zero bar.
+    is_query = [hit.reason == constants.SELECT_REASON_QUERY for hit in selected]
+    species = [
+        f"{hit.species} ({constants.FIG_QUERY_NO_BLAST})" if own else hit.species
+        for hit, own in zip(selected, is_query, strict=True)
+    ]
     identities = [hit.percent_identity for hit in selected]
-    bit_scores = [hit.hit.best_hsp.bit_score for hit in selected]
+    bit_scores = [
+        None if own else hit.hit.best_hsp.bit_score
+        for hit, own in zip(selected, is_query, strict=True)
+    ]
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
@@ -600,7 +609,7 @@ def blast_overview(selected: list[SelectedHit]) -> go.Figure:
             xaxis="x2",
             name=constants.FIG_AXIS_BIT_SCORE,
             marker_color=constants.COLOR_PALETTE["bluish_green"],
-            text=[f"{value:.1f}" for value in bit_scores],
+            text=[None if value is None else f"{value:.1f}" for value in bit_scores],
             textposition="outside",
             hovertemplate="%{y}<br>Bit score: %{x:.1f}<extra></extra>",
         )

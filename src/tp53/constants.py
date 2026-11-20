@@ -240,3 +240,6 @@ ALN_CLASS_SYMBOLS: dict[str, str] = {
 ALN_CLASS_CSS: dict[str, str] = {
     label: f"class-{label.replace(' ', '-')}" for label in CLASS_COLORS
 }
+
+# The query row in V3 is not a BLAST result (§9.1); it has no bit score.
+FIG_QUERY_NO_BLAST: str = "query (no BLAST)"

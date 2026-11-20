@@ -654,7 +654,7 @@ def _render_alignment(result: PipelineResult) -> None:
     )
     _class_legend()
     html = alignment_html(alignment, identity, block=60)
-    st.components.v1.html(html, height=ALIGNMENT_VIEWER_HEIGHT, scrolling=True)
+    st.iframe(html, height=ALIGNMENT_VIEWER_HEIGHT)
 
 
 def _render_regions(result: PipelineResult) -> None:
@@ -694,11 +694,12 @@ def _render_conservation(result: PipelineResult) -> None:
             )
         )
         st.session_state[smoothing_key] = max(1, min(advanced, window_max))
+    # The key is seeded from advanced settings above, so no explicit value is
+    # passed: Streamlit would otherwise warn about a duplicate default.
     smoothing = st.slider(
         "Smoothing window",
         min_value=1,
         max_value=window_max,
-        value=config.SMOOTHING_WINDOW_DEFAULT,
         key=smoothing_key,
     )
     axis_choice = st.radio(

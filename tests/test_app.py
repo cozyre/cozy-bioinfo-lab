@@ -354,3 +354,46 @@ def test_reset_returns_to_idle(monkeypatch: pytest.MonkeyPatch) -> None:
     assert at.session_state["run_state"] == "idle"
     assert at.session_state["result"] is None
     assert any("Load example" in message for message in _messages(at, "info"))
+
+
+def test_example_snapshot_runs_through_real_pipeline_and_viz() -> None:
+    """AC-1/AC-6: the bundled snapshot produces a real, renderable result.
+
+    No pipeline or plotting function is stubbed here. Any attempt to contact a
+    remote service fails the test, proving example mode is fully offline.
+    """
+    from app.state import load_example_inputs
+    from tp53 import viz
+    from tp53.models import PipelineClients
+    from tp53.pipeline import run_pipeline
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("example mode attempted a remote call")
+
+    clients = PipelineClients(
+        forbidden, forbidden, forbidden, forbidden, forbidden, forbidden
+    )
+    result = run_pipeline(load_example_inputs(), clients, lambda stage, detail: None)
+
+    assert result.run_metadata["mode"] == "example"
+    assert [hit.hit.accession for hit in result.selected] == [
+        "P04637",
+        "XP_001172077.2",
+        "NP_035770.2",
+        "NP_112251.2",
+        "NP_776626.1",
+    ]
+    assert len(result.input_records) == 5
+    assert result.alignment is not None and len(result.alignment.rows) == 5
+    assert result.conservation is not None
+    assert result.warnings == []
+    assert len(result.raw_blast_xml) == 5
+    assert result.raw_msa_fasta
+
+    assert viz.conservation_profile(result)
+    assert viz.blast_overview(result.selected)
+    assert viz.feature_bars(result)
+    assert viz.identity_heatmap(result)
+    assert "consensus" in viz.alignment_html(
+        result.alignment, result.conservation.identity
+    ).lower()
