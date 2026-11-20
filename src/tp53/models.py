@@ -218,6 +218,8 @@ class PipelineInputs:
     msa_fasta: str | None = None
     full_sequences: Mapping[str, str] | None = None
     query_info: QueryInfo | None = None
+    #: RIDs saved by the UI on a previous page run; skip re-submission (§12).
+    existing_rids: Mapping[str, str] | None = None
 
 
 @dataclass
