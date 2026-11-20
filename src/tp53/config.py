@@ -175,3 +175,26 @@ SMOOTHING_WINDOW_DEFAULT: int = 5
 
 #: Upload size limit in bytes (§5 Security) — 5 MB.
 MAX_UPLOAD_BYTES: int = 5 * 1024 * 1024
+
+# --- Caching and bundled example snapshot (FR-31, FR-33, A8) -------------------
+
+#: Time-to-live for cached client calls and parsed results, in seconds.
+CACHE_TTL_S: int = 6 * 60 * 60
+
+#: The example snapshot is bundled under ``app/`` so it ships with the app.
+EXAMPLE_DATA_DIRNAME: str = "example_data"
+EXAMPLE_BLAST_XML_FILENAME: str = "blast_tp53_five_species.xml"
+EXAMPLE_MSA_FASTA_FILENAME: str = "msa_tp53_five_species.fasta"
+EXAMPLE_UNIPROT_JSON_FILENAME: str = "uniprot_P04637.json"
+EXAMPLE_SEQUENCE_FILENAMES: tuple[str, ...] = (
+    "NP_001120705.1.fa",
+    "NP_001394193.1.fa",
+    "NP_001394197.1.fa",
+    "NP_001416925.1.fa",
+    "NP_035770.2.fa",
+    "NP_112251.2.fa",
+    "NP_776626.1.fa",
+    "XP_001172077.2.fa",
+    "XP_006533220.1.fa",
+    "XP_016786959.2.fa",
+)

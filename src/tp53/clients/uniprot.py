@@ -76,6 +76,37 @@ def _description(payload: dict[str, Any]) -> str:
     return name
 
 
+def parse_query_info(payload: dict[str, Any], accession: str = "") -> QueryInfo:
+    """Convert a UniProt JSON payload into a :class:`QueryInfo`.
+
+    This is the pure half of :func:`fetch_query_info`, exposed so the bundled
+    example snapshot (A8) can be parsed offline with the same rules.
+
+    Args:
+        payload: decoded UniProt REST JSON entry.
+        accession: fallback accession when the payload has none.
+
+    Returns:
+        Query sequence with organism, gene and selected feature annotations.
+
+    Raises:
+        RemoteServiceError: the payload has no usable sequence.
+    """
+    sequence = str((payload.get("sequence") or {}).get("value") or "").strip()
+    if not sequence:
+        raise RemoteServiceError(f"UniProt returned no sequence for {accession}.")
+
+    primary = str(payload.get("primaryAccession") or accession)
+    record = SequenceRecord(
+        id=primary,
+        accession=primary,
+        organism=str((payload.get("organism") or {}).get("scientificName") or ""),
+        description=_description(payload),
+        sequence=sequence,
+    )
+    return QueryInfo(record=record, features=_parse_features(payload))
+
+
 def fetch_query_info(
     accession: str,
     session: Any,
@@ -103,16 +134,4 @@ def fetch_query_info(
         raise RemoteServiceError(f"UniProt returned invalid JSON for {accession}.") from exc
     if not isinstance(payload, dict):
         raise RemoteServiceError(f"UniProt returned no entry for {accession}.")
-
-    sequence = str((payload.get("sequence") or {}).get("value") or "").strip()
-    if not sequence:
-        raise RemoteServiceError(f"UniProt returned no sequence for {accession}.")
-
-    record = SequenceRecord(
-        id=str(payload.get("primaryAccession") or accession),
-        accession=str(payload.get("primaryAccession") or accession),
-        organism=str((payload.get("organism") or {}).get("scientificName") or ""),
-        description=_description(payload),
-        sequence=sequence,
-    )
-    return QueryInfo(record=record, features=_parse_features(payload))
+    return parse_query_info(payload, accession)

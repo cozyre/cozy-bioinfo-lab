@@ -6,9 +6,13 @@ only data structures passed between layers.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Literal
 
 import pandas as pd
+
+from tp53 import config
 
 
 class ValidationError(Exception):
@@ -174,3 +178,61 @@ class PipelineResult:
     conservation: ConservationResult | None
     run_metadata: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    #: Raw artefacts kept in memory for FR-32 downloads.
+    raw_blast_xml: dict[str, str] = field(default_factory=dict)
+    raw_msa_fasta: str = ""
+
+
+# --- Phase 3 shared contract (§6.1, §7.2) --------------------------------------
+
+#: Progress events emitted as ``(stage, detail)``. Stages are stable strings
+#: used by the UI to update its step indicator; ``detail`` is human-readable.
+ProgressCallback = Callable[[str, str], None]
+
+
+@dataclass(frozen=True)
+class PipelineInputs:
+    """All inputs of one pipeline run, including offline overrides.
+
+    Exactly one of ``query_accession`` and ``query_fasta`` must be supplied,
+    unless ``query_info`` is given (the bundled example snapshot). Uploaded
+    BLAST XML / MSA FASTA replace the corresponding remote stages; full-length
+    sequences keyed by accession replace Entrez fetches in example mode.
+    """
+
+    query_accession: str | None = None
+    accession_source: Literal["uniprot", "ncbi"] = "uniprot"
+    query_fasta: str | None = None
+    query_organism: str = ""
+    species: tuple[str, ...] = config.SPECIES
+    email: str = ""
+    api_key: str | None = None
+    blast_params: config.BlastParams = field(default_factory=config.BlastParams)
+    selection_params: config.SelectionParams = field(
+        default_factory=config.SelectionParams
+    )
+    conservation_params: config.ConservationParams = field(
+        default_factory=config.ConservationParams
+    )
+    blast_xml_by_species: Mapping[str, str] | None = None
+    msa_fasta: str | None = None
+    full_sequences: Mapping[str, str] | None = None
+    query_info: QueryInfo | None = None
+
+
+@dataclass
+class PipelineClients:
+    """Network operations injected into the pipeline (§6.2).
+
+    The app binds real clients with their HTTP sessions, contact email and
+    parameters; offline tests substitute fakes. The pipeline never imports
+    Streamlit or constructs a session itself.
+    """
+
+    fetch_uniprot: Callable[[str], QueryInfo]
+    fetch_ncbi_query_info: Callable[[str], QueryInfo]
+    fetch_protein: Callable[[str], SequenceRecord]
+    submit_blastp_staggered: Callable[[list[tuple[str, str]]], dict[str, str]]
+    #: ``(rid, species) -> raw BLAST XML``.
+    poll_blast: Callable[[str, str], str]
+    run_clustalo: Callable[[str], str]
