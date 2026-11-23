@@ -510,8 +510,9 @@ def alignment_html(aln: Alignment, identity: list[float], block: int = 60) -> st
         f"<h3>{escape(constants.FIG_TITLE_ALIGNMENT, quote=True)}</h3>",
         f"<p><strong>{escape(constants.ALN_LEGEND_TITLE, quote=True)}:</strong> "
         + ", ".join(
-            f"{escape(group, quote=True)} "
-            f"({escape(constants.ALN_PROPERTY_COLORS[group], quote=True)})"
+            f'<span style="color: '
+            f'{escape(constants.ALN_PROPERTY_COLORS[group], quote=True)}">'
+            f"{escape(group, quote=True)}</span>"
             for group in constants.ALN_PROPERTY_CLASSES
         )
         + "</p>",
