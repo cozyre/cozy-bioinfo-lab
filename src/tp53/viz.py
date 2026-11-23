@@ -28,6 +28,7 @@ _BAND_DOMAIN = (0.0, 0.12)
 _PLOT_DOMAIN = (0.18, 1.0)
 _TENS_STEP = 10
 _FULL_WINDOW = 1
+_ALN_LABEL_GAP_CH = 2
 _HEATMAP_COLORSCALE = (
     (0.0, constants.COLOR_PALETTE["vermillion"]),
     (0.5, constants.COLOR_PALETTE["yellow"]),
@@ -483,13 +484,21 @@ def alignment_html(aln: Alignment, identity: list[float], block: int = 60) -> st
     params = config.ConservationParams()
     classes = classify_columns(list(identity), gaps, params)
 
+    label_width = max(
+        (
+            len(constants.ALN_LABEL_RULER_TENS),
+            len(constants.ALN_LABEL_CONSENSUS),
+            len(constants.ALN_LABEL_IDENTITY),
+            *(len(str(identifier)) for identifier in aln.ids),
+        )
+    ) + _ALN_LABEL_GAP_CH
     css = [
         "<style>",
         ".tp53-alignment {font-family: monospace; font-size: 12px;}",
         ".tp53-block {margin-bottom: 1.2em;}",
         ".tp53-block-header {font-weight: bold; margin-bottom: 0.3em;}",
         '.tp53-row {white-space: pre; line-height: 1.25;}',
-        ".tp53-label {display: inline-block; width: 24ch; color: "
+        f".tp53-label {{display: inline-block; width: {label_width}ch; color: "
         f"{constants.COLOR_PALETTE['black']};}}",
     ]
     for group, css_class in constants.ALN_PROPERTY_CLASSES.items():
