@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 import pytest
 
 from tp53 import constants
-from tp53.models import Alignment, PipelineResult
+from tp53.models import Alignment, DomainFeature, PipelineResult
 from tp53.msa import parse_alignment
 from tp53.viz import (
     alignment_html,
@@ -255,3 +255,22 @@ def test_fasta_result_omits_feature_overlays() -> None:
         annotation.text == constants.FIG_NO_FEATURES_NOTICE
         for annotation in bars.layout.annotations
     )
+
+
+def test_feature_bands_use_reference_to_column_map() -> None:
+    """§9.7: reference feature coordinates are mapped, not used as columns."""
+    result = fixture_result()
+    assert result.query is not None and result.alignment is not None
+    result.query.features = [
+        DomainFeature("Domain", "shifted domain", 5, 10)
+    ]
+    # One leading insertion column shifts every reference position by +1.
+    result.alignment.col_to_ref = [None] + list(
+        range(1, len(result.alignment.col_to_ref))
+    )
+
+    fig = conservation_profile(result, x_axis="column")
+    feature = next(
+        trace for trace in fig.data if trace.name == constants.FIG_TRACE_FEATURE
+    )
+    assert tuple(feature.x[:2]) == (6.0, 11.0)

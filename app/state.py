@@ -7,6 +7,7 @@ created by the framework-free core.
 
 from __future__ import annotations
 
+import copy
 import json
 import xml.etree.ElementTree as ET
 from functools import partial
@@ -23,6 +24,8 @@ from tp53.models import (
     PipelineClients,
     PipelineInputs,
     PipelineResult,
+    QueryInfo,
+    SequenceRecord,
 )
 
 #: Keys managed by :func:`init_state` and cleared by :func:`reset_state`.
@@ -32,6 +35,7 @@ STATE_KEYS: tuple[str, ...] = (
     "run_error",
     "progress",
     "rids",
+    "clustalo_job_id",
     "inputs",
     "query_mode",
     "query_signature",
@@ -53,6 +57,7 @@ def init_state() -> None:
         "run_error": "",
         "progress": [],
         "rids": {},
+        "clustalo_job_id": "",
         "inputs": None,
         "query_mode": "accession",
         "query_signature": None,
@@ -115,6 +120,19 @@ def clear_rids() -> None:
     """Discard saved request identifiers, e.g. after Reset or a new query."""
     init_state()
     st.session_state["rids"] = {}
+    st.session_state["clustalo_job_id"] = ""
+
+
+def remember_clustalo_job(job_id: str) -> None:
+    """Save an EBI job ID so a page refresh can resume the alignment (§12)."""
+    init_state()
+    st.session_state["clustalo_job_id"] = job_id
+
+
+def get_clustalo_job() -> str | None:
+    """Return the saved EBI job ID, if any."""
+    init_state()
+    return st.session_state["clustalo_job_id"] or None
 
 
 def save_inputs(inputs: PipelineInputs) -> None:
@@ -152,6 +170,61 @@ def _poll_blast_for_species(
     )
 
 
+@st.cache_data(ttl=config.CACHE_TTL_S, show_spinner=False)
+def _cached_query_info(
+    accession: str, source: str, email: str, api_key: str | None
+) -> QueryInfo:
+    """Fetch and cache query annotations keyed by accession and source (FR-31)."""
+    session = _http_session()
+    if source == "uniprot":
+        return uniprot.fetch_query_info(accession, session=session)
+    return ncbi.fetch_ncbi_query_info(
+        accession, session=session, email=email, api_key=api_key
+    )
+
+
+@st.cache_data(ttl=config.CACHE_TTL_S, show_spinner=False)
+def _cached_protein(
+    accession: str, email: str, api_key: str | None
+) -> SequenceRecord:
+    """Fetch and cache one full-length sequence keyed by accession (FR-31)."""
+    return ncbi.fetch_protein(
+        accession,
+        _http_session(),
+        email=email,
+        api_key=api_key,
+    )
+
+
+def _submit_blastp_and_remember(
+    sequence: str,
+    species: str,
+    *,
+    params: config.BlastParams,
+    email: str,
+    session: requests.Session,
+    api_key: str | None,
+) -> str:
+    """Submit one BLAST job and save its RID at source (§12)."""
+    rid = ncbi.submit_blastp(
+        sequence, species, params, email, session, api_key=api_key
+    )
+    remember_rid(species, rid)
+    return rid
+
+
+def _submit_clustalo_and_remember(
+    fasta: str,
+    *,
+    email: str,
+    session: requests.Session,
+) -> str:
+    """Submit an alignment job and save its ID at source (§12)."""
+    job_id = ebi.submit_clustalo(fasta, email, session)
+    remember_clustalo_job(job_id)
+    return job_id
+
+
 def build_clients(
     email: str,
     api_key: str | None,
@@ -176,19 +249,13 @@ def build_clients(
     session = _http_session()
     params = blast_params or config.BlastParams()
     return PipelineClients(
-        fetch_uniprot=partial(uniprot.fetch_query_info, session=session),
+        fetch_uniprot=partial(
+            _cached_query_info, source="uniprot", email=email, api_key=api_key
+        ),
         fetch_ncbi_query_info=partial(
-            ncbi.fetch_ncbi_query_info,
-            session=session,
-            email=email,
-            api_key=api_key,
+            _cached_query_info, source="ncbi", email=email, api_key=api_key
         ),
-        fetch_protein=partial(
-            ncbi.fetch_protein,
-            session=session,
-            email=email,
-            api_key=api_key,
-        ),
+        fetch_protein=partial(_cached_protein, email=email, api_key=api_key),
         submit_blastp_staggered=partial(
             ncbi.submit_blastp_staggered,
             params=params,
@@ -205,6 +272,27 @@ def build_clients(
         run_clustalo=partial(
             ebi.run_clustalo,
             email=email,
+            session=session,
+            timeout_s=config.EBI_MAX_WAIT_S,
+        ),
+        submit_blastp=partial(
+            _submit_blastp_and_remember,
+            params=params,
+            email=email,
+            session=session,
+            api_key=api_key,
+        ),
+        poll_blast_once=partial(
+            ncbi.poll_blast_once,
+            session=session,
+            email=email,
+            api_key=api_key,
+        ),
+        submit_clustalo=partial(
+            _submit_clustalo_and_remember, email=email, session=session
+        ),
+        resume_clustalo=partial(
+            ebi.resume_clustalo,
             session=session,
             timeout_s=config.EBI_MAX_WAIT_S,
         ),
@@ -237,9 +325,10 @@ def _split_blast_xml_by_species(xml: str) -> dict[str, str]:
         '<!DOCTYPE BlastOutput PUBLIC "-//NCBI//NCBI BlastOutput/EN" '
         '"NCBI_BlastOutput.dtd">\n'
     )
+    template = ET.fromstring(xml)
     split: dict[str, str] = {}
     for species in config.SPECIES:
-        root = ET.fromstring(xml)
+        root = copy.deepcopy(template)
         hits = root.find("./BlastOutput_iterations/Iteration/Iteration_hits")
         if hits is not None:
             for hit in list(hits):

@@ -118,6 +118,11 @@ BLAST_MAX_WAIT_S: int = 15 * 60
 #: Delay between staggered per-species BLAST submissions (§9.1).
 BLAST_STAGGER_DELAY_S: int = 10
 
+#: Minimum wall-clock spacing between *any* two NCBI requests. Round-robin
+#: polling uses this together with :data:`BLAST_POLL_INTERVAL_S` so several
+#: RIDs can be watched in one loop without exceeding NCBI's rate limits.
+BLAST_MIN_REQUEST_INTERVAL_S: int = 10
+
 #: EBI Clustal Omega REST parameters (verified against current job-dispatcher
 #: documentation: email is required, ``out`` returns the aligned FASTA).
 EBI_CLUSTALO_SEQUENCE_TYPE: str = "protein"
@@ -172,6 +177,15 @@ class ConservationParams:
 
 #: Advanced-settings default for the smoothing window (FR-05).
 SMOOTHING_WINDOW_DEFAULT: int = 5
+
+#: The smoothing slider may reach at most this multiple of the default.
+SMOOTHING_MAX_MULTIPLIER: int = 4
+
+#: Fixed pixel height of the embedded alignment viewer (V2).
+ALIGNMENT_VIEWER_HEIGHT_PX: int = 620
+
+#: Number of progress steps shown by the sidebar status indicator (§10).
+PROGRESS_TOTAL_STEPS: int = 7
 
 #: Upload size limit in bytes (§5 Security) — 5 MB.
 MAX_UPLOAD_BYTES: int = 5 * 1024 * 1024

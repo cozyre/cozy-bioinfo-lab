@@ -23,6 +23,109 @@ _FINISHED = "FINISHED"
 _FAILURE_STATUSES = ("FAILED", "ERROR", "NOT_FOUND")
 
 
+def _job_urls(job_id: str) -> tuple[str, str]:
+    """Status and result URLs of one Clustal Omega job (§8)."""
+    status = config.EBI_CLUSTALO_URL + config.EBI_CLUSTALO_STATUS_PATH.format(
+        job_id=job_id
+    )
+    result = config.EBI_CLUSTALO_URL + config.EBI_CLUSTALO_RESULT_PATH.format(
+        job_id=job_id, result_type=config.EBI_CLUSTALO_RESULT_TYPE
+    )
+    return status, result
+
+
+def submit_clustalo(
+    fasta: str,
+    email: str,
+    session: Any,
+    *,
+    timeout: int = config.REQUEST_TIMEOUT_S,
+) -> str:
+    """Submit one Clustal Omega job and return its job ID (FR-14, §12).
+
+    Separating submission from polling lets the app persist the job ID as soon
+    as it is issued, so a page refresh can resume the same alignment.
+
+    Args:
+        fasta: multi-FASTA of query plus selected orthologs.
+        email: contact email sent to EBI as required by its fair-use policy.
+        session: injected requests-like session.
+        timeout: per-request timeout in seconds.
+
+    Returns:
+        EBI job identifier.
+
+    Raises:
+        RemoteServiceError: submission failed or no job ID was returned.
+    """
+    response = request_with_retry(
+        session,
+        "POST",
+        f"{config.EBI_CLUSTALO_URL}{config.EBI_CLUSTALO_RUN_PATH}",
+        timeout=timeout,
+        data={
+            "email": email,
+            "sequence": fasta,
+            "stype": config.EBI_CLUSTALO_SEQUENCE_TYPE,
+        },
+        retry=False,
+    )
+    job_id = response.text.strip().splitlines()[0].strip() if response.text.strip() else ""
+    if not job_id:
+        raise RemoteServiceError("EBI Clustal Omega returned no job ID.")
+    return job_id
+
+
+def poll_clustalo_once(
+    job_id: str,
+    session: Any,
+    *,
+    timeout: int = config.REQUEST_TIMEOUT_S,
+) -> PollOutcome:
+    """Check one Clustal Omega job and fetch its result when finished.
+
+    Args:
+        job_id: identifier returned by :func:`submit_clustalo`.
+        session: injected requests-like session.
+        timeout: per-request timeout in seconds.
+
+    Returns:
+        Pending, complete (with aligned FASTA), or failed outcome.
+    """
+    status_url, result_url = _job_urls(job_id)
+    status_response = request_with_retry(session, "GET", status_url, timeout=timeout)
+    status = status_response.text.strip().upper()
+    if status == _FINISHED:
+        result = request_with_retry(session, "GET", result_url, timeout=timeout)
+        return PollOutcome.complete(result.text)
+    if status in _FAILURE_STATUSES:
+        return PollOutcome.failed(
+            f"EBI Clustal Omega job {job_id} failed with status {status}."
+        )
+    return PollOutcome.pending()
+
+
+def resume_clustalo(
+    job_id: str,
+    session: Any,
+    timeout_s: int,
+    *,
+    poll_interval: int = config.EBI_POLL_INTERVAL_S,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    timeout: int = config.REQUEST_TIMEOUT_S,
+) -> str:
+    """Poll a previously submitted Clustal Omega job until it finishes (§12)."""
+    return poll_until(
+        lambda: poll_clustalo_once(job_id, session, timeout=timeout),
+        label=f"EBI Clustal Omega job {job_id}",
+        timeout_s=timeout_s,
+        interval_s=poll_interval,
+        sleep=sleep,
+        clock=clock,
+    )
+
+
 def run_clustalo(
     fasta: str,
     email: str,
@@ -54,48 +157,13 @@ def run_clustalo(
             job failed.
         RemoteTimeout: the job did not finish before ``timeout_s``.
     """
-    response = request_with_retry(
+    job_id = submit_clustalo(fasta, email, session, timeout=timeout)
+    return resume_clustalo(
+        job_id,
         session,
-        "POST",
-        f"{config.EBI_CLUSTALO_URL}{config.EBI_CLUSTALO_RUN_PATH}",
-        timeout=timeout,
-        data={
-            "email": email,
-            "sequence": fasta,
-            "stype": config.EBI_CLUSTALO_SEQUENCE_TYPE,
-        },
-        retry=False,
-    )
-    job_id = response.text.strip().splitlines()[0].strip() if response.text.strip() else ""
-    if not job_id:
-        raise RemoteServiceError("EBI Clustal Omega returned no job ID.")
-
-    status_url = config.EBI_CLUSTALO_URL + config.EBI_CLUSTALO_STATUS_PATH.format(
-        job_id=job_id
-    )
-    result_url = config.EBI_CLUSTALO_URL + config.EBI_CLUSTALO_RESULT_PATH.format(
-        job_id=job_id, result_type=config.EBI_CLUSTALO_RESULT_TYPE
-    )
-
-    def check() -> PollOutcome:
-        status_response = request_with_retry(
-            session, "GET", status_url, timeout=timeout
-        )
-        status = status_response.text.strip().upper()
-        if status == _FINISHED:
-            result = request_with_retry(session, "GET", result_url, timeout=timeout)
-            return PollOutcome.complete(result.text)
-        if status in _FAILURE_STATUSES:
-            return PollOutcome.failed(
-                f"EBI Clustal Omega job {job_id} failed with status {status}."
-            )
-        return PollOutcome.pending()
-
-    return poll_until(
-        check,
-        label=f"EBI Clustal Omega job {job_id}",
-        timeout_s=timeout_s,
-        interval_s=poll_interval,
+        timeout_s,
+        poll_interval=poll_interval,
         sleep=sleep,
         clock=clock,
+        timeout=timeout,
     )

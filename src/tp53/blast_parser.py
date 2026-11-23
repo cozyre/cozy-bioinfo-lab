@@ -11,6 +11,7 @@ import re
 
 from Bio.Blast import NCBIXML
 
+from tp53 import constants
 from tp53.models import BlastHit, BlastHsp, BlastResult
 
 #: Organism tag inside a RefSeq hit title, e.g. ``... [Mus musculus]``.
@@ -50,18 +51,23 @@ def _parse_organism(title: str) -> str:
     return match.group(1) if match else ""
 
 
-def parse_blast_xml(xml_text: str, species: str = "") -> BlastResult:
+def parse_blast_xml(
+    xml_text: str, species: str = "", *, require_hits: bool = False
+) -> BlastResult:
     """Parse BLAST XML text into a :class:`BlastResult`.
 
     Args:
         xml_text: raw XML from an NCBI BLASTp job (blastp XML format).
         species: the organism filter that was used for this job, if any.
+        require_hits: reject a structurally valid result with zero hits. Used
+            when validating user uploads so an empty file is reported before
+            it can replace previous results (§12).
 
     Returns:
         Parsed result with all hits and their HSPs, in BLAST ranking order.
 
     Raises:
-        ValueError: if the XML holds no BLAST result.
+        ValueError: if the XML holds no BLAST result, or no hits when required.
     """
     blast_records = list(NCBIXML.parse(io.StringIO(xml_text)))
     if not blast_records:
@@ -98,6 +104,8 @@ def parse_blast_xml(xml_text: str, species: str = "") -> BlastResult:
             )
         )
 
+    if require_hits and not hits:
+        raise ValueError(constants.ERR_XML_NO_HITS.format(species=species))
     return BlastResult(
         query_id=record.query,
         query_len=int(record.query_letters),

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -220,6 +220,10 @@ class PipelineInputs:
     query_info: QueryInfo | None = None
     #: RIDs saved by the UI on a previous page run; skip re-submission (§12).
     existing_rids: Mapping[str, str] | None = None
+    #: EBI Clustal Omega job ID saved on a previous page run (§12).
+    msa_job_id: str | None = None
+    #: Smoothing window chosen in advanced settings (FR-05, reproducibility).
+    smoothing_window: int = config.SMOOTHING_WINDOW_DEFAULT
 
 
 @dataclass
@@ -238,3 +242,14 @@ class PipelineClients:
     #: ``(rid, species) -> raw BLAST XML``.
     poll_blast: Callable[[str, str], str]
     run_clustalo: Callable[[str], str]
+    #: ``(sequence, species) -> RID``. When supplied, the pipeline submits and
+    #: saves each RID immediately, keeping the stagger between species (§9.1).
+    submit_blastp: Callable[[str, str], str] | None = None
+    #: ``(rid) -> PollOutcome-like (state, value, error)``. Enables one
+    #: round-robin polling loop for all RIDs instead of one blocking call each.
+    poll_blast_once: Callable[[str], Any] | None = None
+    #: ``(fasta) -> EBI job ID``. Lets the app persist the job ID as soon as it
+    #: is issued so a page refresh can resume polling (§12).
+    submit_clustalo: Callable[[str], str] | None = None
+    #: ``(job_id) -> aligned FASTA``. Resumes a saved EBI job.
+    resume_clustalo: Callable[[str], str] | None = None

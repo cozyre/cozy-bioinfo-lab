@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -128,6 +129,20 @@ class TestMiniXml:
 
         with pytest.raises((ValueError, ExpatError)):
             parse_blast_xml("<?xml version='1.0'?><foo/>")
+
+    def test_require_hits_rejects_empty_but_valid_xml(self) -> None:
+        """Upload validation must reject a valid BLAST file with zero hits."""
+        root = ET.fromstring(MINI_XML)
+        hits = root.find("./BlastOutput_iterations/Iteration/Iteration_hits")
+        assert hits is not None
+        hits.clear()
+        empty_xml = '<?xml version="1.0"?>\n' + ET.tostring(root, encoding="unicode")
+
+        assert parse_blast_xml(empty_xml, species="Mus musculus").hits == []
+        with pytest.raises(ValueError, match="contains no hits"):
+            parse_blast_xml(
+                empty_xml, species="Mus musculus", require_hits=True
+            )
 
 
 class TestCounterNormalisation:

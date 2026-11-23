@@ -7,7 +7,9 @@ exercised fully offline with fake clients and committed fixtures.
 
 from __future__ import annotations
 
+import time
 import warnings
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -179,8 +181,15 @@ def _submit_jobs(
     query: QueryInfo,
     emit: ProgressCallback,
     warnings_out: list[str],
+    *,
+    sleep: Callable[[float], None],
 ) -> dict[str, str]:
-    """Submit only the species without uploaded XML or a saved RID."""
+    """Submit the species without uploaded XML or a saved RID (§9.1, §12).
+
+    With the per-job client, each RID is emitted and persisted by the caller
+    immediately, and the stagger is enforced here between submissions. The
+    legacy batch client remains supported for injected test doubles.
+    """
     uploaded = inputs.blast_xml_by_species or {}
     existing = inputs.existing_rids or {}
     pending = [
@@ -193,13 +202,34 @@ def _submit_jobs(
     if not pending:
         return {}
     jobs = [(species, query.record.sequence) for species in pending]
+    rids: dict[str, str] = {}
+
+    if clients.submit_blastp is not None:
+        for index, (species, sequence) in enumerate(jobs):
+            if index:
+                sleep(config.BLAST_STAGGER_DELAY_S)
+            try:
+                rid = clients.submit_blastp(sequence, species)
+            except Exception as exc:
+                warnings_out.append(
+                    constants.WARN_BLAST_FAILED.format(species=species, error=exc)
+                )
+                continue
+            rids[species] = rid
+            emit(
+                "blast",
+                constants.PROGRESS_BLAST_SUBMITTED.format(species=species, rid=rid),
+            )
+        return rids
+
     try:
-        return dict(clients.submit_blastp_staggered(jobs))
-    except Exception as exc:
-        # A single submission failure must not discard the other species. The
-        # staggered batch is preferred; this per-job retry isolates failures.
-        rids: dict[str, str] = {}
-        for job in jobs:
+        rids.update(dict(clients.submit_blastp_staggered(jobs)))
+    except Exception:
+        # One batch failure must not discard the other species. Retry one job
+        # at a time, still spacing submissions out (§9.1).
+        for index, job in enumerate(jobs):
+            if index:
+                sleep(config.BLAST_STAGGER_DELAY_S)
             try:
                 rids.update(clients.submit_blastp_staggered([job]))
             except Exception as species_exc:
@@ -208,7 +238,108 @@ def _submit_jobs(
                         species=job[0], error=species_exc
                     )
                 )
-        return rids
+    for species, rid in rids.items():
+        emit(
+            "blast",
+            constants.PROGRESS_BLAST_SUBMITTED.format(species=species, rid=rid),
+        )
+    return rids
+
+
+def _poll_sequentially(
+    clients: PipelineClients,
+    pending: dict[str, str],
+    emit: ProgressCallback,
+    warnings_out: list[str],
+    raw_xml: dict[str, str],
+    parsed: dict[str, BlastResult],
+) -> None:
+    """Fallback for injected clients that expose only blocking ``poll_blast``."""
+    for species, rid in pending.items():
+        emit("blast", constants.PROGRESS_BLAST_POLLING.format(species=species))
+        try:
+            xml = clients.poll_blast(rid, species)
+            parsed[species] = blast_parser.parse_blast_xml(xml, species)
+        except Exception as exc:
+            warnings_out.append(
+                constants.WARN_BLAST_FAILED.format(species=species, error=exc)
+            )
+            continue
+        raw_xml[species] = xml
+        emit("blast", constants.PROGRESS_BLAST_READY.format(species=species))
+
+
+def _poll_round_robin(
+    clients: PipelineClients,
+    pending: dict[str, str],
+    emit: ProgressCallback,
+    warnings_out: list[str],
+    raw_xml: dict[str, str],
+    parsed: dict[str, BlastResult],
+    *,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+) -> None:
+    """Poll all RIDs in one loop, respecting both NCBI rate limits (§9.1).
+
+    A RID is never polled more often than :data:`config.BLAST_POLL_INTERVAL_S`,
+    and no two requests are closer together than
+    :data:`config.BLAST_MIN_REQUEST_INTERVAL_S`, whichever is stricter.
+
+    Args:
+        clients: injected clients exposing ``poll_blast_once``.
+        pending: mapping of species to still-running RIDs.
+        emit: progress event callback.
+        warnings_out: collected non-fatal stage warnings.
+        raw_xml: populated with finished XML, keyed by species.
+        parsed: populated with parsed BLAST results, keyed by species.
+        sleep: injectable wait function (offline tests never really wait).
+        clock: injectable monotonic clock.
+    """
+    started = clock()
+    deadline = started + config.BLAST_MAX_WAIT_S
+    # The last submission (or cached fetch) was an NCBI request too, so the
+    # first poll must also respect the minimum spacing between requests.
+    last_request = started
+    last_poll: dict[str, float] = {}
+    remaining = dict(pending)
+
+    while remaining and clock() < deadline:
+        for species, rid in list(remaining.items()):
+            now = clock()
+            wait = config.BLAST_MIN_REQUEST_INTERVAL_S - (now - last_request)
+            if species in last_poll:
+                wait = max(
+                    wait, config.BLAST_POLL_INTERVAL_S - (now - last_poll[species])
+                )
+            if wait > 0:
+                sleep(wait)
+            emit("blast", constants.PROGRESS_BLAST_POLLING.format(species=species))
+            try:
+                outcome = clients.poll_blast_once(rid)
+                last_request = clock()
+                last_poll[species] = last_request
+                state = getattr(outcome, "state", "")
+                if state == "failed":
+                    raise RuntimeError(
+                        getattr(outcome, "error", "") or "BLAST job failed"
+                    )
+                if state != "done":
+                    continue
+                xml = getattr(outcome, "value", "")
+                parsed[species] = blast_parser.parse_blast_xml(xml, species)
+            except Exception as exc:
+                warnings_out.append(
+                    constants.WARN_BLAST_FAILED.format(species=species, error=exc)
+                )
+                remaining.pop(species, None)
+                continue
+            raw_xml[species] = xml
+            emit("blast", constants.PROGRESS_BLAST_READY.format(species=species))
+            remaining.pop(species, None)
+
+    for species in remaining:
+        warnings_out.append(constants.WARN_BLAST_TIMEOUT.format(species=species))
 
 
 def _collect_blast(
@@ -217,55 +348,68 @@ def _collect_blast(
     query: QueryInfo,
     emit: ProgressCallback,
     warnings_out: list[str],
+    *,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
 ) -> tuple[dict[str, str], dict[str, BlastResult]]:
     """Obtain and parse one BLAST XML per species, tolerating local failures."""
     uploaded = inputs.blast_xml_by_species or {}
     rids = dict(inputs.existing_rids or {})
-    new_rids = _submit_jobs(inputs, clients, query, emit, warnings_out)
+    new_rids = _submit_jobs(inputs, clients, query, emit, warnings_out, sleep=sleep)
     rids.update(new_rids)
 
     raw_xml: dict[str, str] = {}
     parsed: dict[str, BlastResult] = {}
+    pending: dict[str, str] = {}
     for species in inputs.species:
         if _is_query_species(query, species):
             # The query organism is represented by the query itself (§9.1).
             if species in uploaded:
                 raw_xml[species] = uploaded[species]
+                parsed[species] = blast_parser.parse_blast_xml(uploaded[species], species)
             emit("blast", constants.PROGRESS_BLAST_QUERY.format(species=species))
             continue
-        try:
-            if species in uploaded:
-                emit("blast", constants.PROGRESS_BLAST_UPLOAD.format(species=species))
-                xml = uploaded[species]
-            elif species in rids:
-                rid = rids[species]
-                if species in new_rids:
-                    emit(
-                        "blast",
-                        constants.PROGRESS_BLAST_SUBMITTED.format(
-                            species=species, rid=rid
-                        ),
-                    )
-                else:
-                    emit(
-                        "blast",
-                        constants.PROGRESS_BLAST_RESUME.format(
-                            species=species, rid=rid
-                        ),
-                    )
-                emit("blast", constants.PROGRESS_BLAST_POLLING.format(species=species))
-                xml = clients.poll_blast(rid, species)
-                emit("blast", constants.PROGRESS_BLAST_READY.format(species=species))
-            else:
-                raise ValidationError(f"No BLAST result available for {species}.")
-            result = blast_parser.parse_blast_xml(xml, species)
-        except Exception as exc:
+        if species in uploaded:
+            emit("blast", constants.PROGRESS_BLAST_UPLOAD.format(species=species))
+            try:
+                parsed[species] = blast_parser.parse_blast_xml(uploaded[species], species)
+            except Exception as exc:
+                warnings_out.append(
+                    constants.WARN_BLAST_FAILED.format(species=species, error=exc)
+                )
+                continue
+            raw_xml[species] = uploaded[species]
+        elif species in rids:
+            # New RIDs were already reported at submission time (§12).
+            if species not in new_rids:
+                emit(
+                    "blast",
+                    constants.PROGRESS_BLAST_RESUME.format(
+                        species=species, rid=rids[species]
+                    ),
+                )
+            pending[species] = rids[species]
+        else:
             warnings_out.append(
-                constants.WARN_BLAST_FAILED.format(species=species, error=exc)
+                constants.WARN_BLAST_FAILED.format(
+                    species=species, error="no BLAST result available"
+                )
             )
-            continue
-        raw_xml[species] = xml
-        parsed[species] = result
+
+    if pending:
+        if clients.poll_blast_once is not None:
+            _poll_round_robin(
+                clients,
+                pending,
+                emit,
+                warnings_out,
+                raw_xml,
+                parsed,
+                sleep=sleep,
+                clock=clock,
+            )
+        else:
+            _poll_sequentially(clients, pending, emit, warnings_out, raw_xml, parsed)
     return raw_xml, parsed
 
 
@@ -382,6 +526,42 @@ def _assemble_records(
     return records, kept
 
 
+def _prepare_msa(
+    inputs: PipelineInputs,
+    clients: PipelineClients,
+    input_records: list[SequenceRecord],
+    emit: ProgressCallback,
+) -> str:
+    """Return aligned FASTA, resuming a saved EBI job when available (§12).
+
+    An uploaded alignment always wins. Otherwise a persisted job ID is
+    resumed; only a fresh run submits a new Clustal Omega job. Clients without
+    the split submit/resume contract keep the original blocking call.
+    """
+    if inputs.msa_fasta:
+        emit(
+            "msa",
+            constants.PROGRESS_MSA_UPLOAD.format(count=len(input_records)),
+        )
+        return inputs.msa_fasta
+
+    fasta_text = to_fasta(input_records)
+    if inputs.msa_job_id and clients.resume_clustalo is not None:
+        emit(
+            "msa",
+            constants.PROGRESS_MSA_RESUME.format(job_id=inputs.msa_job_id),
+        )
+        return clients.resume_clustalo(inputs.msa_job_id)
+    if clients.submit_clustalo is not None and clients.resume_clustalo is not None:
+        emit("msa", constants.PROGRESS_MSA_SERVICE.format(count=len(input_records)))
+        job_id = clients.submit_clustalo(fasta_text)
+        emit("msa", constants.PROGRESS_MSA_SUBMITTED.format(job_id=job_id))
+        return clients.resume_clustalo(job_id)
+
+    emit("msa", constants.PROGRESS_MSA_SERVICE.format(count=len(input_records)))
+    return clients.run_clustalo(fasta_text)
+
+
 def _build_metadata(
     inputs: PipelineInputs,
     query: QueryInfo,
@@ -390,6 +570,7 @@ def _build_metadata(
     raw_msa_fasta: str,
     selected: list[SelectedHit],
     alignment: Alignment | None,
+    smoothing_window: int,
 ) -> dict[str, Any]:
     """Record provenance, applied settings and artefact availability."""
     has_overrides = bool(
@@ -421,7 +602,7 @@ def _build_metadata(
         "blast_params": asdict(inputs.blast_params),
         "selection_params": asdict(inputs.selection_params),
         "conservation_params": asdict(inputs.conservation_params),
-        "smoothing_window": config.SMOOTHING_WINDOW_DEFAULT,
+        "smoothing_window": smoothing_window,
         "selected_accessions": [hit.hit.accession for hit in selected],
         "library_versions": _library_versions(),
         "raw_artifacts": {
@@ -440,6 +621,9 @@ def run_pipeline(
     inputs: PipelineInputs,
     clients: PipelineClients,
     progress_cb: ProgressCallback,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> PipelineResult:
     """Run all stages of §6.1 and return a single renderable result.
 
@@ -451,6 +635,8 @@ def run_pipeline(
         inputs: query, species, parameters and optional offline overrides.
         clients: injected network operations (real or fake).
         progress_cb: called as ``(stage, detail)``; stages follow :data:`STAGES`.
+        sleep: injectable wait function used for submission stagger and polling.
+        clock: injectable monotonic clock used by the polling deadline.
 
     Returns:
         Complete result with raw artefacts, metadata and warnings.
@@ -469,7 +655,9 @@ def run_pipeline(
     if not inputs.species:
         raise ValidationError(constants.ERR_NO_SPECIES)
 
-    raw_xml, blast_results = _collect_blast(inputs, clients, query, emit, warnings_out)
+    raw_xml, blast_results = _collect_blast(
+        inputs, clients, query, emit, warnings_out, sleep=sleep, clock=clock
+    )
     selected = _select_hits(inputs, blast_results, query, emit, warnings_out)
     if not selected:
         raise ValidationError(constants.ERR_NO_ORTHOLOGS)
@@ -479,16 +667,7 @@ def run_pipeline(
     if len(input_records) < 2:
         raise ValidationError(constants.ERR_NO_ORTHOLOGS)
 
-    fasta_text = inputs.msa_fasta or to_fasta(input_records)
-    if inputs.msa_fasta:
-        emit(
-            "msa",
-            constants.PROGRESS_MSA_UPLOAD.format(count=len(input_records)),
-        )
-        msa_fasta = inputs.msa_fasta
-    else:
-        emit("msa", constants.PROGRESS_MSA_SERVICE.format(count=len(input_records)))
-        msa_fasta = clients.run_clustalo(fasta_text)
+    msa_fasta = _prepare_msa(inputs, clients, input_records, emit)
 
     expected_ids = [record.id for record in input_records]
     expected_sequences = [record.sequence for record in input_records]
@@ -511,7 +690,14 @@ def run_pipeline(
     )
 
     metadata = _build_metadata(
-        inputs, query, started, raw_xml, msa_fasta, selected, aln
+        inputs,
+        query,
+        started,
+        raw_xml,
+        msa_fasta,
+        selected,
+        aln,
+        inputs.smoothing_window,
     )
     emit("done", constants.PROGRESS_DONE.format(count=len(input_records)))
     return PipelineResult(

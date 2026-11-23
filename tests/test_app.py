@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -187,7 +187,11 @@ def _sample_result() -> PipelineResult:
         input_records=[query_record, hit],
         alignment=alignment,
         conservation=conservation,
-        run_metadata={"query": "P04637", "database": "refseq_protein"},
+        run_metadata={
+            "query": "P04637",
+            "database": "refseq_protein",
+            "query_source": "uniprot",
+        },
         warnings=[],
         raw_blast_xml={"Homo sapiens": "<BlastOutput/>"},
         raw_msa_fasta=f">P04637\n{SEQUENCE}\n",
@@ -307,15 +311,34 @@ def test_downloads_are_present_in_example_mode(
     assert "Identity CSV" in labels
 
 
-def test_rids_are_saved_and_reused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§12: BLAST RIDs from progress events survive into the next run."""
-    seen: list[dict[str, str]] = []
+def test_job_ids_are_saved_at_source_and_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§12: client wrappers persist RIDs/EBI IDs into the next run's inputs."""
+    seen: list[Any] = []
+
+    def fake_build_clients(email: str, api_key: str | None, **kwargs: Any) -> Any:
+        del email, api_key, kwargs
+
+        def submit_blastp(_sequence: str, species: str) -> str:
+            pages.state.remember_rid(species, "RID123")
+            return "RID123"
+
+        def submit_clustalo(_fasta: str) -> str:
+            pages.state.remember_clustalo_job("EBI123")
+            return "EBI123"
+
+        return SimpleNamespace(
+            submit_blastp=submit_blastp, submit_clustalo=submit_clustalo
+        )
 
     def fake_run(inputs: Any, clients: Any, progress_cb: Any) -> PipelineResult:
-        seen.append(dict(inputs.existing_rids or {}))
+        seen.append(inputs)
+        if not (inputs.existing_rids or {}):
+            clients.submit_blastp("SEQUENCE", "Homo sapiens")
+            clients.submit_clustalo("FASTA")
         progress_cb("blast", "submitted: Homo sapiens (RID123)")
         return _sample_result()
 
+    monkeypatch.setattr(pages.state, "build_clients", fake_build_clients)
     monkeypatch.setattr(pages, "run_pipeline", fake_run)
     for name in (
         "conservation_profile",
@@ -335,10 +358,13 @@ def test_rids_are_saved_and_reused(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _sidebar_button(at, "Run analysis").click().run()
     assert at.session_state["rids"] == {"Homo sapiens": "RID123"}
+    assert at.session_state["clustalo_job_id"] == "EBI123"
 
     _sidebar_button(at, "Run analysis").click().run()
-    assert seen[0] == {}
-    assert seen[1] == {"Homo sapiens": "RID123"}
+    assert seen[0].existing_rids is None
+    assert seen[0].msa_job_id is None
+    assert seen[1].existing_rids == {"Homo sapiens": "RID123"}
+    assert seen[1].msa_job_id == "EBI123"
 
 
 def test_reset_returns_to_idle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,3 +423,57 @@ def test_example_snapshot_runs_through_real_pipeline_and_viz() -> None:
     assert "consensus" in viz.alignment_html(
         result.alignment, result.conservation.identity
     ).lower()
+
+
+def test_failed_retry_keeps_previous_result_rendered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§12: a failed retry reports the stage but keeps earlier artefacts."""
+    _patch_pipeline(monkeypatch)
+    at = _app()
+    at.run()
+    _load_example(at)
+    assert len(at.tabs) == 5
+
+    def fail(inputs: Any, clients: Any, progress_cb: Any) -> PipelineResult:
+        del inputs, clients
+        progress_cb("blast", "missing")
+        raise RuntimeError("no BLAST result")
+
+    monkeypatch.setattr(pages, "run_pipeline", fail)
+    email = [field for field in at.sidebar.text_input if field.label == "Contact email"][0]
+    email.set_value("user@example.org").run()
+    _sidebar_button(at, "Run analysis").click().run()
+
+    assert at.session_state["run_state"] == "failed"
+    assert not at.exception
+    assert len(at.tabs) == 5
+    errors = _messages(at, "error")
+    assert any("BLAST" in message for message in errors)
+    assert any(constants.UPLOAD_HINT_BLAST in message for message in errors)
+
+
+def test_fasta_result_shows_feature_skip_notice() -> None:
+    """The feature notice follows query provenance, not an empty feature list."""
+    result = _sample_result()
+    assert result.query is not None
+    result.query.features = []
+    result.run_metadata["query_source"] = "fasta"
+
+    at = _app()
+    at.session_state["run_state"] = "success"
+    at.session_state["result"] = result
+    at.run()
+
+    assert not at.exception
+    assert any(constants.FEATURE_SKIP_NOTICE in m for m in _messages(at, "info"))
+
+
+def test_uploaded_msa_validation_names_offending_sequence() -> None:
+    """§12: a malformed upload fails before the run with a specific message."""
+    valid = "ACDEFGHIKLMNPQRSTVWY"
+    problem = pages._prevalidate_msa(f">Alpha\n{valid}\n>Beta\n{valid[:-1]}1\n")
+
+    assert problem is not None
+    assert "Beta" in problem
+    assert "1" in problem

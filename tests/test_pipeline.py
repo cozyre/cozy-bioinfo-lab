@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree
 
 import pytest
 
 from tp53 import config, constants
-from tp53.clients.base import RemoteServiceError
+from tp53.clients.base import PollOutcome, RemoteServiceError
 from tp53.clients.uniprot import parse_query_info
 from tp53.fasta_io import parse_fasta
 from tp53.models import (
@@ -21,6 +23,7 @@ from tp53.models import (
     QueryInfo,
     ValidationError,
 )
+from tp53 import pipeline as pipeline_module
 from tp53.pipeline import STAGES, run_pipeline
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -87,17 +90,38 @@ class FakeClients:
     submit_calls: list[list[tuple[str, str]]] = field(default_factory=list)
     poll_calls: list[tuple[str, str]] = field(default_factory=list)
     clustalo_calls: list[str] = field(default_factory=list)
+    # Phase-4 split contract, enabled only by ``as_contract(split=True)``.
+    msa_job_id: str = "EBI_JOB_1"
+    submit_blastp_calls: list[tuple[str, str]] = field(default_factory=list)
+    rid_by_species: dict[str, str] = field(default_factory=dict)
+    species_by_rid: dict[str, str] = field(default_factory=dict)
+    one_shot_polls: dict[str, int] = field(default_factory=dict)
+    submit_clustalo_calls: list[str] = field(default_factory=list)
+    resume_clustalo_calls: list[str] = field(default_factory=list)
+    resume_fasta: str = ""
 
-    def as_contract(self) -> PipelineClients:
-        """Bind the fakes to the public injected-clients contract."""
-        return PipelineClients(
-            fetch_uniprot=self.fetch_uniprot,
-            fetch_ncbi_query_info=self.fetch_ncbi_query_info,
-            fetch_protein=self.fetch_protein,
-            submit_blastp_staggered=self.submit_blastp_staggered,
-            poll_blast=self.poll_blast,
-            run_clustalo=self.run_clustalo,
-        )
+    def as_contract(self, *, split: bool = False) -> PipelineClients:
+        """Bind the fakes to the public injected-clients contract.
+
+        The split clients expose per-job submission, one-shot polling and
+        resumable alignment; existing tests keep the original blocking path.
+        """
+        contract: dict[str, Any] = {
+            "fetch_uniprot": self.fetch_uniprot,
+            "fetch_ncbi_query_info": self.fetch_ncbi_query_info,
+            "fetch_protein": self.fetch_protein,
+            "submit_blastp_staggered": self.submit_blastp_staggered,
+            "poll_blast": self.poll_blast,
+            "run_clustalo": self.run_clustalo,
+        }
+        if split:
+            contract.update(
+                submit_blastp=self.submit_blastp,
+                poll_blast_once=self.poll_blast_once,
+                submit_clustalo=self.submit_clustalo,
+                resume_clustalo=self.resume_clustalo,
+            )
+        return PipelineClients(**contract)
 
     def fetch_uniprot(self, accession: str) -> QueryInfo:
         self.network_calls.append(f"uniprot:{accession}")
@@ -133,6 +157,34 @@ class FakeClients:
         self.clustalo_calls.append(fasta)
         return aligned_fasta_from_input(fasta)
 
+    def submit_blastp(self, sequence: str, species: str) -> str:
+        """Return a stable RID and record the submission in real time."""
+        self.submit_blastp_calls.append((species, sequence))
+        rid = f"SPLIT_{species.split()[0].upper()}"
+        self.rid_by_species[species] = rid
+        self.species_by_rid[rid] = species
+        return rid
+
+    def poll_blast_once(self, rid: str) -> PollOutcome:
+        """Return pending once, then the fixture XML for that species."""
+        self.one_shot_polls[rid] = self.one_shot_polls.get(rid, 0) + 1
+        species = self.species_by_rid[rid]
+        if self.one_shot_polls[rid] < 2:
+            return PollOutcome.pending()
+        return PollOutcome.complete(xml_for_species(species))
+
+    def submit_clustalo(self, fasta: str) -> str:
+        """Save the submitted FASTA so a resumed job can reuse it."""
+        self.submit_clustalo_calls.append(fasta)
+        return self.msa_job_id
+
+    def resume_clustalo(self, job_id: str) -> str:
+        """Return the alignment previously produced for the saved job."""
+        self.resume_clustalo_calls.append(job_id)
+        if self.resume_fasta:
+            return self.resume_fasta
+        return aligned_fasta_from_input(self.submit_clustalo_calls[-1])
+
 
 def make_inputs(**overrides: object) -> PipelineInputs:
     """Default remote-mode inputs, overridable per test."""
@@ -146,7 +198,12 @@ def make_inputs(**overrides: object) -> PipelineInputs:
 
 
 def run(
-    inputs: PipelineInputs, clients: FakeClients
+    inputs: PipelineInputs,
+    clients: FakeClients,
+    *,
+    split: bool = False,
+    sleep: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[PipelineResult, list[tuple[str, str]]]:
     """Run the pipeline while collecting stable progress events."""
     events: list[tuple[str, str]] = []
@@ -155,7 +212,26 @@ def run(
         events.append((stage, detail))
 
     callback: ProgressCallback = progress
-    return run_pipeline(inputs, clients.as_contract(), callback), events
+    kwargs: dict[str, Any] = {}
+    if sleep is not None:
+        kwargs["sleep"] = sleep
+    if clock is not None:
+        kwargs["clock"] = clock
+    result = run_pipeline(inputs, clients.as_contract(split=split), callback, **kwargs)
+    return result, events
+
+
+def fake_timers() -> tuple[list[float], Callable[[float], None], Callable[[], float]]:
+    """Injected sleep/clock pair that advances without real waiting."""
+    waits: list[float] = []
+    now = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        waits.append(seconds)
+        now += seconds
+
+    return waits, sleep, lambda: now
 
 
 def test_success_with_five_species( ) -> None:
@@ -369,3 +445,107 @@ def test_fasta_query_has_no_feature_annotations() -> None:
     assert list(result.conservation.feature_summary["feature"]) == [
         constants.OUTSIDE_FEATURES_LABEL
     ]
+
+
+def test_split_clients_emit_rids_immediately_and_poll_round_robin() -> None:
+    """§9.1/§12: RIDs arrive before polling and all jobs share one poll loop."""
+    clients = FakeClients()
+    waits, sleep, clock = fake_timers()
+    species = config.SPECIES[:3]  # query plus two BLAST targets
+
+    result, events = run(
+        make_inputs(species=species, smoothing_window=7),
+        clients,
+        split=True,
+        sleep=sleep,
+        clock=clock,
+    )
+
+    details = [detail for _stage, detail in events]
+    submitted = [detail for detail in details if detail.startswith("submitted:")]
+    polling = [detail for detail in details if detail.startswith("polling:")]
+
+    assert submitted[0] == constants.PROGRESS_BLAST_SUBMITTED.format(
+        species=config.SPECIES[1], rid="SPLIT_PAN"
+    )
+    assert details.index(submitted[0]) < details.index(polling[0])
+    assert polling == [
+        constants.PROGRESS_BLAST_POLLING.format(species=config.SPECIES[1]),
+        constants.PROGRESS_BLAST_POLLING.format(species=config.SPECIES[2]),
+        constants.PROGRESS_BLAST_POLLING.format(species=config.SPECIES[1]),
+        constants.PROGRESS_BLAST_POLLING.format(species=config.SPECIES[2]),
+    ]
+    assert waits == [
+        config.BLAST_STAGGER_DELAY_S,
+        config.BLAST_MIN_REQUEST_INTERVAL_S,
+        config.BLAST_MIN_REQUEST_INTERVAL_S,
+        config.BLAST_POLL_INTERVAL_S - config.BLAST_MIN_REQUEST_INTERVAL_S,
+        config.BLAST_MIN_REQUEST_INTERVAL_S,
+    ]
+    assert clients.poll_calls == []
+    assert clients.one_shot_polls == {"SPLIT_PAN": 2, "SPLIT_MUS": 2}
+    assert result.run_metadata["smoothing_window"] == 7
+
+
+def test_split_msa_job_is_submitted_then_resumed() -> None:
+    """§12: an EBI job ID is emitted at submission and reused on a new run."""
+    clients = FakeClients()
+    waits, sleep, clock = fake_timers()
+    species = config.SPECIES[:3]  # include two BLAST targets so stagger applies
+
+    first, events = run(
+        make_inputs(species=species, smoothing_window=3),
+        clients,
+        split=True,
+        sleep=sleep,
+        clock=clock,
+    )
+    details = [detail for _stage, detail in events]
+    assert constants.PROGRESS_MSA_SUBMITTED.format(job_id=clients.msa_job_id) in details
+    assert first.run_metadata["smoothing_window"] == 3
+    assert waits[0] == config.BLAST_STAGGER_DELAY_S
+    assert len(clients.submit_clustalo_calls) == 1
+
+    resumed = FakeClients(
+        resume_fasta=aligned_fasta_from_input(clients.submit_clustalo_calls[0])
+    )
+    second_inputs = make_inputs(
+        species=species,
+        msa_job_id=clients.msa_job_id,
+        smoothing_window=3,
+    )
+    second, second_events = run(
+        second_inputs, resumed, split=True, sleep=lambda _: None, clock=lambda: 0.0
+    )
+    assert resumed.submit_clustalo_calls == []
+    assert resumed.resume_clustalo_calls == [clients.msa_job_id]
+    assert constants.PROGRESS_MSA_RESUME.format(
+        job_id=clients.msa_job_id
+    ) in [detail for _stage, detail in second_events]
+    assert second.run_metadata["smoothing_window"] == 3
+
+
+def test_round_robin_timeout_warns_for_each_pending_species(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired BLAST deadline warns per species instead of hanging (§12)."""
+    monkeypatch.setattr(config, "BLAST_MAX_WAIT_S", 0)
+    clients = FakeClients()
+    warnings_out: list[str] = []
+
+    raw_xml, parsed = pipeline_module._collect_blast(
+        make_inputs(),
+        clients.as_contract(split=True),
+        QUERY_INFO,
+        lambda stage, detail: None,
+        warnings_out,
+        sleep=lambda _: None,
+        clock=lambda: 0.0,
+    )
+
+    assert parsed == {}
+    assert set(raw_xml) <= {"Homo sapiens"}
+    for species in config.SPECIES:
+        if species != "Homo sapiens":
+            expected = constants.WARN_BLAST_TIMEOUT.format(species=species)
+            assert warnings_out.count(expected) == 1

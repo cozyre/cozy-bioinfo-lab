@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 
 from tp53 import config, constants
 from tp53.conservation import classify_columns
-from tp53.models import Alignment, PipelineResult, SelectedHit
+from tp53.models import Alignment, DomainFeature, PipelineResult, SelectedHit
 
 #: Structural constants (not tunable defaults; those live in config.py).
 _Y_MIN = 0.0
@@ -123,6 +123,48 @@ def _column_of_reference(positions: list[int | None], position: int) -> int | No
         if mapped == position:
             return index + 1
     return None
+
+
+def _feature_spans(
+    positions: list[int | None], features: list[DomainFeature]
+) -> list[tuple[DomainFeature, tuple[float, float], tuple[float, float]]]:
+    """Map reference-numbered features into both x-axis coordinate systems.
+
+    Feature boundaries are 1-based *reference* positions (§9.7). They must be
+    looked up in ``col_to_ref`` first; treating them as alignment columns would
+    shift every band after the first gap.
+
+    Args:
+        positions: ``col_to_ref`` of the alignment (one entry per column).
+        features: annotated features in reference numbering.
+
+    Returns:
+        ``(feature, column_span, reference_span)`` triples for features whose
+        both boundaries could be mapped to the alignment.
+    """
+    spans: list[
+        tuple[DomainFeature, tuple[float, float], tuple[float, float]]
+    ] = []
+    for feature in features:
+        start_col = _column_of_reference(positions, feature.start)
+        end_col = _column_of_reference(positions, feature.end)
+        if start_col is None or end_col is None or start_col > end_col:
+            continue
+        mapped = [
+            position
+            for position in positions[start_col - 1 : end_col]
+            if position is not None
+        ]
+        if not mapped:
+            continue
+        spans.append(
+            (
+                feature,
+                (float(start_col), float(end_col)),
+                (float(mapped[0]), float(mapped[-1])),
+            )
+        )
+    return spans
 
 
 def conservation_profile(
@@ -257,18 +299,9 @@ def conservation_profile(
 
     # Feature bands live in their own narrow track below the identity plot.
     features = result.query.features if result.query is not None else []
+    feature_spans = _feature_spans(positions, features)
     feature_tracks = 0
-    for feature in features:
-        reference_span = _span_x(
-            positions, feature.start, feature.end, reference=True
-        )
-        if reference_span is None:
-            continue
-        column_start = _column_of_reference(positions, feature.start)
-        column_end = _column_of_reference(positions, feature.end)
-        if column_start is None or column_end is None:
-            continue
-        column_span = (float(column_start), float(column_end))
+    for feature, column_span, reference_span in feature_spans:
         start, end = reference_span if use_reference else column_span
         feature_tracks += 1
         fig.add_trace(
@@ -302,20 +335,9 @@ def conservation_profile(
         label_centres_ref: list[float] = []
         label_centres_col: list[float] = []
         label_text: list[str] = []
-        for feature in features:
-            reference_span = _span_x(
-                positions, feature.start, feature.end, reference=True
-            )
-            if reference_span is None:
-                continue
-            column_start = _column_of_reference(positions, feature.start)
-            column_end = _column_of_reference(positions, feature.end)
-            if column_start is None or column_end is None:
-                continue
-            label_centres_ref.append(
-                (reference_span[0] + reference_span[1]) / 2
-            )
-            label_centres_col.append((column_start + column_end) / 2)
+        for feature, column_span, reference_span in feature_spans:
+            label_centres_ref.append((reference_span[0] + reference_span[1]) / 2)
+            label_centres_col.append((column_span[0] + column_span[1]) / 2)
             label_text.append(str(feature.name))
         fig.add_trace(
             go.Scatter(
